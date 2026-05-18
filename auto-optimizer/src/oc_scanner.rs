@@ -13,7 +13,7 @@ use num_traits::pow;
 use nvapi_hi::Gpu;
 use nvapi_hi::{ClockDomain, KilohertzDelta, PState};
 use nvml_wrapper::Nvml;
-use nvoc_core::legacy::{core_reset_vfp, get_voltage_by_point, set_vfp_curve, set_vfp_curve_warn};
+use nvoc_core::legacy::{core_reset_vfp, get_voltage_by_point, set_vfp_curve};
 use nvoc_core::{Error, GpuOcParams, fetch_gpu_type};
 use std::cmp::min;
 use std::io::Write;
@@ -25,6 +25,43 @@ use std::{fs, iter};
 
 mod pressure_runner {
     use super::*;
+
+    fn set_vfp_range_warn(gpu: &&Gpu, range: std::ops::RangeInclusive<usize>, delta_khz: i32) {
+        for offset in range {
+            match gpu.set_vfp(
+                iter::once((offset, KilohertzDelta(delta_khz))),
+                iter::empty(),
+            ) {
+                Ok(_) => {}
+                Err(e) => eprintln!(
+                    "Warning: {}, set_vfp offset={} Error. GPU crashed...",
+                    e, offset
+                ),
+            }
+        }
+    }
+
+    fn set_vfp_curve_warn(
+        gpu: &&Gpu,
+        point: usize,
+        vfp_set_range: usize,
+        flat_curve_flag: bool,
+        main_delta: i32,
+        lower_delta: Option<i32>,
+    ) {
+        if !flat_curve_flag {
+            set_vfp_range_warn(
+                gpu,
+                (point - vfp_set_range)..=(point + vfp_set_range),
+                main_delta,
+            );
+        } else {
+            set_vfp_range_warn(gpu, point..=(point + vfp_set_range), main_delta);
+            if let Some(ld) = lower_delta {
+                set_vfp_range_warn(gpu, (point - vfp_set_range)..=(point - 1), ld);
+            }
+        }
+    }
 
     pub(super) struct TestPressureConfig<'a> {
         pub(super) point: usize,

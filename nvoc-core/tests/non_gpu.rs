@@ -4,11 +4,12 @@ use nvml_wrapper::enums::device::FanControlPolicy;
 use nvoc_core::legacy::select_gpu_ids;
 use nvoc_core::{
     BackendSet, ConvertEnum, GpuId, GpuOperation, GpuSelector, GpuTarget, GpuType, OperationKind,
-    QueryPowerLimits, VfpResetDomain, detect_gpu_type, find_matching_vfp_point,
+    PciAddress, QueryPowerLimits, VfpResetDomain, detect_gpu_type, find_matching_vfp_point,
     nvml_pstate_to_index, nvml_pstate_to_str, parse_nvml_fan_control_policy, parse_nvml_pstate,
     run, try_parse_nvml_pstate,
 };
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 #[test]
 fn pstate_parse_forms() {
@@ -253,4 +254,31 @@ fn structured_operation_requires_matching_backend() {
     assert!(err.contains("has no NVML backend"));
     assert_eq!(QueryPowerLimits.kind(), OperationKind::QueryPowerLimits);
     assert_eq!(BackendSet::Both, BackendSet::Both);
+}
+
+#[test]
+fn pci_address_parses_standard_and_nvapi_forms() {
+    let standard = PciAddress::from_str("0000:01:00.0").unwrap();
+    assert_eq!(standard.domain, 0);
+    assert_eq!(standard.bus, 1);
+    assert_eq!(standard.device, 0);
+    assert_eq!(standard.function, 0);
+    assert_eq!(standard.to_string(), "0000:01:00.0");
+    assert_eq!(GpuId::from_pci_address(standard), GpuId(0x100));
+
+    let nvapi = PciAddress::from_str("PCIe x16 (1:0 routed to IRQ 0)").unwrap();
+    assert_eq!(nvapi.bus, 1);
+    assert_eq!(nvapi.device, 0);
+    assert_eq!(
+        GpuId::from_pci_str("PCIe x16 (1:0 routed to IRQ 0)").unwrap(),
+        GpuId(0x100)
+    );
+}
+
+#[test]
+fn gpu_id_round_trips_pci_bus() {
+    let id = GpuId::from_pci_bus(3);
+    assert_eq!(id, GpuId(0x300));
+    assert_eq!(id.pci_bus(), 3);
+    assert!(GpuId::from_pci_str("invalid-pci-id").is_err());
 }

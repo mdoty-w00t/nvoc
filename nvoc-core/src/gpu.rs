@@ -1,4 +1,5 @@
 use super::Error;
+use super::target::gpu_id_from_nvml_device;
 use nvapi_hi::Gpu;
 use nvml_wrapper::Nvml;
 use std::str::FromStr;
@@ -123,11 +124,7 @@ pub fn get_sorted_gpu_ids_nvml(nvml: &Nvml) -> Result<Vec<u32>, Error> {
         let device = nvml
             .device_by_index(i)
             .map_err(|e| Error::Custom(format!("NVML device_by_index({}) failed: {:?}", i, e)))?;
-        let pci = device
-            .pci_info()
-            .map_err(|e| Error::Custom(format!("NVML pci_info({}) failed: {:?}", i, e)))?;
-
-        gpu_ids.push(pci.bus.saturating_mul(256));
+        gpu_ids.push(gpu_id_from_nvml_device(&device)?.0);
     }
 
     gpu_ids.sort_unstable();

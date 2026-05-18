@@ -5,16 +5,6 @@ structured `GpuTarget` + `GpuOperation` + `OperationReport` API.
 
 ## Marked gaps
 
-- `legacy::query_nvml_power_watts_by_pci`
-  - Gap: consumes an ad hoc PCI string instead of a canonical `GpuTarget`.
-  - Replacement: `run(target, QueryPowerLimits)`.
-
-- `legacy::set_vfp_range_warn` and `legacy::set_vfp_curve_warn`
-  - Gap: warning behavior is emitted through stderr and the functions do not
-    return structured warning data.
-  - Replacement: migrate callers to `SetVfpRangeDelta`; report warnings through
-    `OperationReport::warnings` when per-point warning preservation is needed.
-
 - `legacy::handle_test_voltage_limits`
   - Gap: workflow-shaped name and callback-based printing.
   - Replacement: `run(target, ProbeVoltageLimits)`.

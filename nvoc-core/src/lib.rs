@@ -30,7 +30,10 @@ pub use result::{
     OperationWarning, PowerLimits, PstateClockRange, SupportedApplicationClocks, TargetOutcome,
     TdpTempLimits, TemperatureThreshold, VoltageFrequencyCheck, VoltageLimits,
 };
-pub use target::{BackendSet, GpuId, GpuTarget, TargetInventory, discover_targets, select_targets};
+pub use target::{
+    BackendSet, GpuId, GpuTarget, PciAddress, TargetInventory, discover_targets,
+    gpu_id_from_nvapi_gpu, gpu_id_from_nvml_device, pci_address_from_nvml_device, select_targets,
+};
 pub use types::{NvapiLockedVoltageTarget, VfpResetDomain};
 
 #[doc(hidden)]

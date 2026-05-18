@@ -5,10 +5,11 @@ use nvoc_core::legacy::{
     get_nvml_min_max_fan_speed, get_nvml_num_fans, get_nvml_pstate_info,
     get_nvml_supported_applications_clocks, get_nvml_temperature_thresholds,
     get_sorted_gpu_ids_nvml, get_sorted_gpus, get_voltage_by_point, query_nvml_power_watts,
-    query_nvml_power_watts_by_pci, select_gpu_ids, select_gpus, single_gpu,
-    voltage_frequency_check,
+    select_gpu_ids, select_gpus, single_gpu, voltage_frequency_check,
 };
-use nvoc_core::{Error, GpuSelector, fetch_gpu_type, nvml_pstate_to_str};
+use nvoc_core::{
+    Error, GpuId, GpuSelector, fetch_gpu_type, gpu_id_from_nvml_device, nvml_pstate_to_str,
+};
 use serde_json::Value;
 use std::env;
 use std::fs;
@@ -121,12 +122,25 @@ fn discovery_nvml_ids() {
 
     for id in ids {
         assert_eq!(id % 256, 0, "NVML ids should use NVAPI PCI bus encoding");
+        assert_eq!(GpuId(id).pci_bus().saturating_mul(256), id);
         if let Some(truth) = truth_for_gpu(id)
             && let Some(bus) = truth.get("pci_bus").and_then(Value::as_u64)
         {
             assert_eq!(id / 256, bus as u32);
         }
     }
+}
+
+#[test]
+#[ignore]
+fn discovery_nvml_device_id_conversion() {
+    let nvml = nvml();
+    let ids = get_sorted_gpu_ids_nvml(&nvml).expect("NVML ids should be readable");
+    assert!(!ids.is_empty());
+    let device = nvml
+        .device_by_index(0)
+        .expect("first NVML device should be readable");
+    assert_eq!(gpu_id_from_nvml_device(&device).unwrap().0, ids[0]);
 }
 
 #[test]
@@ -191,7 +205,7 @@ fn nvml_power_ok() {
 fn nvml_power_bad_gpu() {
     let nvml = nvml();
     assert!(query_nvml_power_watts(&nvml, INVALID_GPU_ID).is_none());
-    assert!(query_nvml_power_watts_by_pci("invalid-pci-id").is_none());
+    assert!(GpuId::from_pci_str("invalid-pci-id").is_err());
 }
 
 #[test]

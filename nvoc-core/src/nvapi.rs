@@ -1166,23 +1166,6 @@ pub fn voltage_frequency_check(
 // VFP batch-setting helpers used by the CLI autoscan path.
 // ---------------------------------------------------------------------------
 
-/// Set the same frequency delta on a VFP point range.
-/// Errors are logged and the scan continues so the caller can recover from GPU resets.
-pub fn set_vfp_range_warn(gpu: &&Gpu, range: std::ops::RangeInclusive<usize>, delta_khz: i32) {
-    for offset in range {
-        match gpu.set_vfp(
-            iter::once((offset, KilohertzDelta(delta_khz))),
-            iter::empty(),
-        ) {
-            Ok(_) => {}
-            Err(e) => eprintln!(
-                "Warning: {}, set_vfp offset={} Error. GPU crashed...",
-                e, offset
-            ),
-        }
-    }
-}
-
 /// Set the same frequency delta on a VFP point range, propagating errors.
 pub fn set_vfp_range(
     gpu: &&Gpu,
@@ -1196,29 +1179,6 @@ pub fn set_vfp_range(
         )?;
     }
     Ok(())
-}
-
-/// Set the main VFP scan range, and optionally a lower range for flat-curve mode.
-pub fn set_vfp_curve_warn(
-    gpu: &&Gpu,
-    point: usize,
-    vfp_set_range: usize,
-    flat_curve_flag: bool,
-    main_delta: i32,
-    lower_delta: Option<i32>,
-) {
-    if !flat_curve_flag {
-        set_vfp_range_warn(
-            gpu,
-            (point - vfp_set_range)..=(point + vfp_set_range),
-            main_delta,
-        );
-    } else {
-        set_vfp_range_warn(gpu, point..=(point + vfp_set_range), main_delta);
-        if let Some(ld) = lower_delta {
-            set_vfp_range_warn(gpu, (point - vfp_set_range)..=(point - 1), ld);
-        }
-    }
 }
 
 /// Set the main VFP scan range, and optionally a lower range for flat-curve mode.
