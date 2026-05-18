@@ -10,7 +10,7 @@ use nvoc_core::{
 use std::collections::BTreeMap;
 
 #[test]
-fn nvml_pstate_parsing_accepts_common_forms() {
+fn pstate_parse_forms() {
     assert_eq!(try_parse_nvml_pstate("P0").unwrap(), PerformanceState::Zero);
     assert_eq!(
         try_parse_nvml_pstate("p15").unwrap(),
@@ -26,7 +26,7 @@ fn nvml_pstate_parsing_accepts_common_forms() {
 }
 
 #[test]
-fn nvml_pstate_formatting_round_trips_known_states() {
+fn pstate_format_roundtrip() {
     for index in 0..=15 {
         let raw = format!("P{index}");
         let pstate = parse_nvml_pstate(&raw);
@@ -40,7 +40,7 @@ fn nvml_pstate_formatting_round_trips_known_states() {
 }
 
 #[test]
-fn vfp_reset_domain_convert_enum_matches_cli_values() {
+fn vfp_reset_domain_cli_values() {
     assert_eq!(
         VfpResetDomain::from_str("all").unwrap(),
         VfpResetDomain::All
@@ -62,7 +62,7 @@ fn vfp_reset_domain_convert_enum_matches_cli_values() {
 }
 
 #[test]
-fn convert_enum_covers_clock_pstate_and_cooler_values() {
+fn convert_enum_values() {
     assert_eq!(PState::from_str("P0").unwrap(), PState::P0);
     assert_eq!(PState::P15.to_str(), "P15");
     assert!(PState::from_str("P16").is_err());
@@ -83,7 +83,7 @@ fn convert_enum_covers_clock_pstate_and_cooler_values() {
 }
 
 #[test]
-fn nvml_fan_control_policy_parser_accepts_cli_aliases() {
+fn fan_policy_aliases() {
     assert_eq!(
         parse_nvml_fan_control_policy("continuous").unwrap(),
         FanControlPolicy::TemperatureContinousSw
@@ -104,7 +104,7 @@ fn nvml_fan_control_policy_parser_accepts_cli_aliases() {
 }
 
 #[test]
-fn gpu_id_selection_supports_indices_and_nvapi_bus_ids() {
+fn gpu_id_selection_ok() {
     let gpu_ids = [0x100, 0x300, 0x900];
 
     assert_eq!(
@@ -133,7 +133,7 @@ fn gpu_id_selection_supports_indices_and_nvapi_bus_ids() {
 }
 
 #[test]
-fn gpu_id_selection_rejects_invalid_and_missing_specs() {
+fn gpu_id_selection_rejects_bad_specs() {
     let gpu_ids = [0x100, 0x300];
 
     let err = select_gpu_ids(&gpu_ids, &GpuSelector::from_specs(["x".to_string()]))
@@ -153,7 +153,7 @@ fn gpu_id_selection_rejects_invalid_and_missing_specs() {
 }
 
 #[test]
-fn gpu_type_detection_classifies_consumer_and_datacenter_generations() {
+fn gpu_type_detection() {
     let cases = [
         (
             "NVIDIA GeForce RTX 5090 Laptop GPU GB203",
@@ -184,7 +184,7 @@ fn gpu_type_detection_classifies_consumer_and_datacenter_generations() {
 }
 
 #[test]
-fn gpu_type_parameter_helpers_cover_special_cases() {
+fn gpu_type_params() {
     let mobile_50 = GpuType::Mobile50Series;
     assert!(mobile_50.oc_params().is_50_series);
     assert_eq!(mobile_50.oc_params().testing_step, 5);
@@ -204,7 +204,7 @@ fn gpu_type_parameter_helpers_cover_special_cases() {
 }
 
 #[test]
-fn gpu_type_display_is_stable_for_known_and_unknown_types() {
+fn gpu_type_display() {
     assert_eq!(
         GpuType::Desktop40Series.to_string(),
         "40 series desktop detected"
@@ -213,7 +213,7 @@ fn gpu_type_display_is_stable_for_known_and_unknown_types() {
 }
 
 #[test]
-fn find_matching_vfp_point_returns_nearest_voltage() {
+fn vfp_point_nearest_voltage() {
     let table = BTreeMap::from([
         (
             7,
@@ -240,7 +240,7 @@ fn find_matching_vfp_point_returns_nearest_voltage() {
 }
 
 #[test]
-fn single_dash_arg_check_reports_known_long_option_typos() {
+fn single_dash_typos() {
     let cmd = Command::new("nvoc")
         .arg(Arg::new("gpu").long("gpu"))
         .subcommand(Command::new("set").arg(Arg::new("output-format").long("output-format")));

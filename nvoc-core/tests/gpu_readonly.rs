@@ -100,7 +100,7 @@ fn matches_from(args: &[&str]) -> ArgMatches {
 
 #[test]
 #[ignore]
-fn gpu_readonly_discovery_nvapi_get_sorted_gpus_happy_safe_invariants() {
+fn discovery_nvapi_sorted() {
     let gpus = sorted_gpus();
     let ids = gpus.iter().map(|gpu| gpu.id()).collect::<Vec<_>>();
     assert_sorted_unique(&ids);
@@ -128,7 +128,7 @@ fn gpu_readonly_discovery_nvapi_get_sorted_gpus_happy_safe_invariants() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_discovery_nvml_get_sorted_gpu_ids_happy_safe_invariants() {
+fn discovery_nvml_ids() {
     let nvml = nvml();
     let ids = get_sorted_gpu_ids_nvml(&nvml).expect("NVML ids should be readable");
     assert!(!ids.is_empty());
@@ -146,7 +146,7 @@ fn gpu_readonly_discovery_nvml_get_sorted_gpu_ids_happy_safe_invariants() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_discovery_selection_happy_and_failure_paths() {
+fn selection_nvapi() {
     let gpus = sorted_gpus();
     let selected = select_gpus(&gpus, &GpuSelector::all()).unwrap();
     assert_eq!(selected.len(), gpus.len());
@@ -168,7 +168,7 @@ fn gpu_readonly_discovery_selection_happy_and_failure_paths() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_discovery_nvml_select_gpu_ids_happy_and_failure_paths() {
+fn selection_nvml_ids() {
     let nvml = nvml();
     let ids = get_sorted_gpu_ids_nvml(&nvml).unwrap();
     let all = select_gpu_ids(&ids, &GpuSelector::all()).unwrap();
@@ -182,7 +182,7 @@ fn gpu_readonly_discovery_nvml_select_gpu_ids_happy_and_failure_paths() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_power_happy_matches_ground_truth() {
+fn nvml_power_ok() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     let (min_w, current_w, max_w) =
@@ -203,7 +203,7 @@ fn gpu_readonly_nvml_power_happy_matches_ground_truth() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_power_failure_invalid_gpu_id() {
+fn nvml_power_bad_gpu() {
     let nvml = nvml();
     assert!(query_nvml_power_watts(&nvml, INVALID_GPU_ID).is_none());
     assert!(query_nvml_power_watts_by_pci("invalid-pci-id").is_none());
@@ -211,7 +211,7 @@ fn gpu_readonly_nvml_power_failure_invalid_gpu_id() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_clock_offsets_happy_valid_or_unsupported() {
+fn nvml_offsets_ok() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     for (pstate, _, _, _, _) in get_nvml_pstate_info(&nvml, gpu_id).unwrap_or_default() {
@@ -226,7 +226,7 @@ fn gpu_readonly_nvml_clock_offsets_happy_valid_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_clock_offsets_failure_invalid_gpu_id() {
+fn nvml_offsets_bad_gpu() {
     let nvml = nvml();
     let pstate = nvoc_core::parse_nvml_pstate("P0");
     assert!(get_nvml_core_clock_vf_offset(&nvml, INVALID_GPU_ID, pstate).is_none());
@@ -235,7 +235,7 @@ fn gpu_readonly_nvml_clock_offsets_failure_invalid_gpu_id() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_temperature_thresholds_happy_valid_or_unsupported() {
+fn nvml_temp_thresholds_ok() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     if let Some(thresholds) = get_nvml_temperature_thresholds(&nvml, gpu_id) {
@@ -250,14 +250,14 @@ fn gpu_readonly_nvml_temperature_thresholds_happy_valid_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_temperature_thresholds_failure_invalid_gpu_id() {
+fn nvml_temp_thresholds_bad_gpu() {
     let nvml = nvml();
     assert!(get_nvml_temperature_thresholds(&nvml, INVALID_GPU_ID).is_none());
 }
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_pstate_info_happy_matches_ground_truth() {
+fn nvml_pstates_ok() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     if let Some(pstates) = get_nvml_pstate_info(&nvml, gpu_id) {
@@ -284,14 +284,14 @@ fn gpu_readonly_nvml_pstate_info_happy_matches_ground_truth() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_pstate_info_failure_invalid_gpu_id() {
+fn nvml_pstates_bad_gpu() {
     let nvml = nvml();
     assert!(get_nvml_pstate_info(&nvml, INVALID_GPU_ID).is_none());
 }
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_applications_clocks_happy_valid_or_unsupported() {
+fn nvml_app_clocks_ok() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     if let Some(clocks) = get_nvml_supported_applications_clocks(&nvml, gpu_id) {
@@ -306,14 +306,14 @@ fn gpu_readonly_nvml_applications_clocks_happy_valid_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_applications_clocks_failure_invalid_gpu_id() {
+fn nvml_app_clocks_bad_gpu() {
     let nvml = nvml();
     assert!(get_nvml_supported_applications_clocks(&nvml, INVALID_GPU_ID).is_none());
 }
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_fan_limits_happy_matches_ground_truth() {
+fn nvml_fans_ok() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     if let Some((min, max)) = get_nvml_min_max_fan_speed(&nvml, gpu_id) {
@@ -332,7 +332,7 @@ fn gpu_readonly_nvml_fan_limits_happy_matches_ground_truth() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvml_fan_limits_failure_invalid_gpu_id() {
+fn nvml_fans_bad_gpu() {
     let nvml = nvml();
     assert!(get_nvml_min_max_fan_speed(&nvml, INVALID_GPU_ID).is_none());
     assert!(get_nvml_num_fans(&nvml, INVALID_GPU_ID).is_none());
@@ -340,7 +340,7 @@ fn gpu_readonly_nvml_fan_limits_failure_invalid_gpu_id() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvapi_voltage_by_point_happy_valid_or_unsupported() {
+fn nvapi_voltage_point_ok() {
     let gpu = first_gpu();
     let status = gpu.status().expect("GPU status should be readable");
     let Some(vfp) = status.vfp else {
@@ -365,14 +365,14 @@ fn gpu_readonly_nvapi_voltage_by_point_happy_valid_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvapi_voltage_by_point_failure_invalid_vfp_point() {
+fn nvapi_voltage_point_bad_point() {
     let gpu = first_gpu();
     assert!(get_voltage_by_point(&gpu, usize::MAX).is_err());
 }
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvapi_tdp_temp_limits_happy_valid_or_unsupported() {
+fn nvapi_tdp_temp_ok() {
     let matches = matches_from(&["gpu-readonly"]);
     let result = get_gpu_tdp_temp_limit(matches, || {});
     match result {
@@ -390,14 +390,14 @@ fn gpu_readonly_nvapi_tdp_temp_limits_happy_valid_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvapi_tdp_temp_limits_failure_invalid_gpu_id() {
+fn nvapi_tdp_temp_bad_gpu() {
     let matches = matches_from(&["gpu-readonly", "--gpu", "999999"]);
     assert!(get_gpu_tdp_temp_limit(matches, || {}).is_err());
 }
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvapi_voltage_frequency_check_happy_valid_or_unsupported() {
+fn nvapi_vf_check_ok() {
     let gpu = first_gpu();
     let status = gpu.status().expect("GPU status should be readable");
     let Some(vfp) = status.vfp else {
@@ -423,7 +423,7 @@ fn gpu_readonly_nvapi_voltage_frequency_check_happy_valid_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_readonly_nvapi_voltage_frequency_check_failure_invalid_vfp_point() {
+fn nvapi_vf_check_bad_point() {
     let matches = matches_from(&["gpu-readonly"]);
     assert!(voltage_frequency_check(matches, usize::MAX, || {}).is_err());
 }

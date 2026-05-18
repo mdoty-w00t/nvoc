@@ -50,6 +50,17 @@ fn assert_invalid_gpu_id_error(result: Result<(), Error>) {
     assert!(err.to_string().contains("not found"), "{err}");
 }
 
+fn assert_not_permission_denied(msg: &str) {
+    assert!(
+        !msg.contains("No Permission")
+            && !msg.contains("Insufficient Permissions")
+            && !msg.contains("Permission Denied")
+            && !msg.contains("NVAPI_INVALID_USER_PRIVILEGE")
+            && !msg.contains("InvalidUserPrivilege"),
+        "permission denied: {msg}"
+    );
+}
+
 fn log_cleanup_error(label: &str, err: impl std::fmt::Display) {
     eprintln!("Warning: cleanup failed for {label}: {err}");
 }
@@ -157,7 +168,7 @@ impl Drop for NvapiCleanupGuard<'_> {
 
 #[test]
 #[ignore]
-fn gpu_write_conservative_nvml_fan_validation_failure_invalid_level() {
+fn nvml_fan_level_rejects() {
     let nvml = nvml();
     let result = set_fan_speed(&nvml, INVALID_GPU_ID, 0, FanControlPolicy::Manual, 101);
     let err = result.expect_err("fan levels above 100 should be rejected");
@@ -166,7 +177,7 @@ fn gpu_write_conservative_nvml_fan_validation_failure_invalid_level() {
 
 #[test]
 #[ignore]
-fn gpu_write_conservative_nvml_invalid_gpu_id_failures_do_not_write() {
+fn nvml_bad_gpu_rejects() {
     let nvml = nvml();
     let pstate = parse_nvml_pstate("P0");
 
@@ -193,7 +204,7 @@ fn gpu_write_conservative_nvml_invalid_gpu_id_failures_do_not_write() {
 
 #[test]
 #[ignore]
-fn gpu_write_conservative_nvml_power_current_value_write_or_unsupported() {
+fn nvml_power_current() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     let _cleanup = NvmlCleanupGuard::new(&nvml, gpu_id);
@@ -212,11 +223,9 @@ fn gpu_write_conservative_nvml_power_current_value_write_or_unsupported() {
             }
             Err(err) => {
                 let msg = err.to_string();
+                assert_not_permission_denied(&msg);
                 assert!(
-                    msg.contains("Not Supported")
-                        || msg.contains("No Permission")
-                        || msg.contains("Insufficient Permissions")
-                        || msg.contains("NVML Set Power Limit Error"),
+                    msg.contains("Not Supported") || msg.contains("NVML Set Power Limit Error"),
                     "{msg}"
                 );
             }
@@ -226,7 +235,7 @@ fn gpu_write_conservative_nvml_power_current_value_write_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_write_conservative_nvml_clock_offset_current_value_writes_or_unsupported() {
+fn nvml_offsets_current() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     let mut cleanup = NvmlCleanupGuard::new(&nvml, gpu_id);
@@ -243,7 +252,11 @@ fn gpu_write_conservative_nvml_clock_offset_current_value_writes_or_unsupported(
                     get_nvml_core_clock_vf_offset(&nvml, gpu_id, pstate),
                     Some(offset)
                 ),
-                Err(err) => assert!(err.to_string().contains("NVML Set Core Clock")),
+                Err(err) => {
+                    let msg = err.to_string();
+                    assert_not_permission_denied(&msg);
+                    assert!(msg.contains("NVML Set Core Clock"), "{msg}");
+                }
             }
         }
 
@@ -253,7 +266,11 @@ fn gpu_write_conservative_nvml_clock_offset_current_value_writes_or_unsupported(
                     get_nvml_mem_clock_vf_offset(&nvml, gpu_id, pstate),
                     Some(offset)
                 ),
-                Err(err) => assert!(err.to_string().contains("NVML Set Mem Clock")),
+                Err(err) => {
+                    let msg = err.to_string();
+                    assert_not_permission_denied(&msg);
+                    assert!(msg.contains("NVML Set Mem Clock"), "{msg}");
+                }
             }
         }
     }
@@ -261,7 +278,7 @@ fn gpu_write_conservative_nvml_clock_offset_current_value_writes_or_unsupported(
 
 #[test]
 #[ignore]
-fn gpu_write_conservative_nvml_reset_calls_valid_gpu_or_unsupported() {
+fn nvml_resets() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
     let _cleanup = NvmlCleanupGuard::new(&nvml, gpu_id);
@@ -273,11 +290,9 @@ fn gpu_write_conservative_nvml_reset_calls_valid_gpu_or_unsupported() {
     ] {
         if let Err(err) = result {
             let msg = err.to_string();
+            assert_not_permission_denied(&msg);
             assert!(
-                msg.contains("Not Supported")
-                    || msg.contains("No Permission")
-                    || msg.contains("Insufficient Permissions")
-                    || msg.contains("NVML Reset"),
+                msg.contains("Not Supported") || msg.contains("NVML Reset"),
                 "{msg}"
             );
         }
@@ -286,16 +301,18 @@ fn gpu_write_conservative_nvml_reset_calls_valid_gpu_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_write_conservative_nvapi_reset_locks_valid_gpu_or_unsupported() {
+fn nvapi_lock_resets() {
     let gpu = first_gpu();
     let _cleanup = NvapiCleanupGuard::new(&gpu);
 
     for domain in [ClockDomain::Graphics, ClockDomain::Memory] {
         match reset_vfp_frequency_lock(&gpu, domain) {
             Ok(()) => {}
-            Err(Error::Nvapi(_))
-            | Err(Error::VfpUnsupported)
-            | Err(Error::FeatureUnsupportedErr) => {}
+            Err(Error::VfpUnsupported) | Err(Error::FeatureUnsupportedErr) => {}
+            Err(err) if matches!(err, Error::Nvapi(_)) => {
+                let msg = err.to_string();
+                assert_not_permission_denied(&msg);
+            }
             Err(err) => panic!("unexpected NVAPI VFP lock reset error: {err}"),
         }
     }
@@ -303,19 +320,18 @@ fn gpu_write_conservative_nvapi_reset_locks_valid_gpu_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_write_conservative_nvapi_vfp_delta_reset_valid_gpu_or_unsupported() {
+fn nvapi_vfp_delta_reset() {
     let gpu = first_gpu();
     let _cleanup = NvapiCleanupGuard::new(&gpu);
     match reset_vfp_deltas(&gpu, VfpResetDomain::All) {
         Ok(()) => {}
         Err(err) => {
             let msg = err.to_string();
+            assert_not_permission_denied(&msg);
             assert!(
                 msg.contains("VFP unsupported")
                     || msg.contains("Feature unsupported")
-                    || msg.contains("NVAPI error")
-                    || msg.contains("NVAPI_INVALID_USER_PRIVILEGE")
-                    || msg.contains("InvalidUserPrivilege"),
+                    || msg.contains("NVAPI error"),
                 "{msg}"
             );
         }
@@ -324,7 +340,7 @@ fn gpu_write_conservative_nvapi_vfp_delta_reset_valid_gpu_or_unsupported() {
 
 #[test]
 #[ignore]
-fn gpu_write_conservative_nvapi_pstate_current_delta_write_or_unsupported() {
+fn nvapi_pstate_zero_delta() {
     let gpu = first_gpu();
     let _cleanup = NvapiCleanupGuard::new(&gpu);
     for (pstate, domain) in [
@@ -335,6 +351,7 @@ fn gpu_write_conservative_nvapi_pstate_current_delta_write_or_unsupported() {
             Ok(()) => {}
             Err(err) => {
                 let msg = err.to_string();
+                assert_not_permission_denied(&msg);
                 assert!(
                     msg.contains("not found")
                         || msg.contains("not editable")
