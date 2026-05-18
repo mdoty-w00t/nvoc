@@ -50,19 +50,28 @@ fn assert_invalid_gpu_id_error(result: Result<(), Error>) {
     assert!(err.to_string().contains("not found"), "{err}");
 }
 
+fn is_permission_denied(msg: &str) -> bool {
+    msg.contains("No Permission")
+        || msg.contains("Insufficient Permissions")
+        || msg.contains("Permission Denied")
+        || msg.contains("NVAPI_INVALID_USER_PRIVILEGE")
+        || msg.contains("InvalidUserPrivilege")
+}
+
 fn assert_not_permission_denied(msg: &str) {
-    assert!(
-        !msg.contains("No Permission")
-            && !msg.contains("Insufficient Permissions")
-            && !msg.contains("Permission Denied")
-            && !msg.contains("NVAPI_INVALID_USER_PRIVILEGE")
-            && !msg.contains("InvalidUserPrivilege"),
-        "permission denied: {msg}"
-    );
+    assert!(!is_permission_denied(msg), "permission denied: {msg}");
 }
 
 fn log_cleanup_error(label: &str, err: impl std::fmt::Display) {
     eprintln!("Warning: cleanup failed for {label}: {err}");
+}
+
+fn handle_cleanup_error(label: &str, err: impl std::fmt::Display, fail_on_permission: bool) {
+    let msg = err.to_string();
+    if fail_on_permission {
+        assert_not_permission_denied(&msg);
+    }
+    log_cleanup_error(label, msg);
 }
 
 struct NvmlCleanupGuard<'a> {
@@ -70,6 +79,7 @@ struct NvmlCleanupGuard<'a> {
     gpu_id: u32,
     restore_power_limit_w: Option<u32>,
     restore_clock_offsets: Vec<(PerformanceState, Option<i32>, Option<i32>)>,
+    cleaned: bool,
 }
 
 impl<'a> NvmlCleanupGuard<'a> {
@@ -81,6 +91,7 @@ impl<'a> NvmlCleanupGuard<'a> {
                 .map(|(_, current_w, _)| current_w.round() as u32)
                 .filter(|limit| *limit > 0),
             restore_clock_offsets: Vec::new(),
+            cleaned: false,
         }
     }
 
@@ -91,22 +102,29 @@ impl<'a> NvmlCleanupGuard<'a> {
             get_nvml_mem_clock_vf_offset(self.nvml, self.gpu_id, pstate),
         ));
     }
-}
 
-impl Drop for NvmlCleanupGuard<'_> {
-    fn drop(&mut self) {
+    fn reset_after_write(&mut self) {
+        self.cleanup(true);
+    }
+
+    fn cleanup(&mut self, fail_on_permission: bool) {
+        if self.cleaned {
+            return;
+        }
+        self.cleaned = true;
+
         for (pstate, core_offset, mem_offset) in self.restore_clock_offsets.iter().copied() {
             if let Some(offset) = core_offset
                 && let Err(err) =
                     set_nvml_core_clock_vf_offset(self.nvml, self.gpu_id, offset, pstate)
             {
-                log_cleanup_error("NVML core clock offset restore", err);
+                handle_cleanup_error("NVML core clock offset restore", err, fail_on_permission);
             }
             if let Some(offset) = mem_offset
                 && let Err(err) =
                     set_nvml_mem_clock_vf_offset(self.nvml, self.gpu_id, offset, pstate)
             {
-                log_cleanup_error("NVML memory clock offset restore", err);
+                handle_cleanup_error("NVML memory clock offset restore", err, fail_on_permission);
             }
         }
 
@@ -125,44 +143,71 @@ impl Drop for NvmlCleanupGuard<'_> {
             ),
         ] {
             if let Err(err) = result {
-                log_cleanup_error(label, err);
+                handle_cleanup_error(label, err, fail_on_permission);
             }
         }
 
         if let Some(limit_w) = self.restore_power_limit_w
             && let Err(err) = set_nvml_power_limit(self.nvml, self.gpu_id, limit_w)
         {
-            log_cleanup_error("NVML power limit restore", err);
+            handle_cleanup_error("NVML power limit restore", err, fail_on_permission);
         }
+    }
+}
+
+impl Drop for NvmlCleanupGuard<'_> {
+    fn drop(&mut self) {
+        self.cleanup(false);
     }
 }
 
 struct NvapiCleanupGuard<'a> {
     gpu: &'a nvapi_hi::Gpu,
+    cleaned: bool,
 }
 
 impl<'a> NvapiCleanupGuard<'a> {
     fn new(gpu: &'a nvapi_hi::Gpu) -> Self {
-        Self { gpu }
+        Self {
+            gpu,
+            cleaned: false,
+        }
+    }
+
+    fn reset_after_write(&mut self) {
+        self.cleanup(true);
+    }
+
+    fn cleanup(&mut self, fail_on_permission: bool) {
+        if self.cleaned {
+            return;
+        }
+        self.cleaned = true;
+
+        for domain in [ClockDomain::Graphics, ClockDomain::Memory] {
+            if let Err(err) = reset_vfp_frequency_lock(self.gpu, domain) {
+                handle_cleanup_error("NVAPI VFP frequency lock reset", err, fail_on_permission);
+            }
+            if let Err(err) =
+                set_pstate_clock_offset_preserve(self.gpu, PState::P0, domain, KilohertzDelta(0))
+            {
+                handle_cleanup_error(
+                    "NVAPI P0 pstate clock offset reset",
+                    err,
+                    fail_on_permission,
+                );
+            }
+        }
+
+        if let Err(err) = reset_vfp_deltas(self.gpu, VfpResetDomain::All) {
+            handle_cleanup_error("NVAPI VFP delta reset", err, fail_on_permission);
+        }
     }
 }
 
 impl Drop for NvapiCleanupGuard<'_> {
     fn drop(&mut self) {
-        for domain in [ClockDomain::Graphics, ClockDomain::Memory] {
-            if let Err(err) = reset_vfp_frequency_lock(self.gpu, domain) {
-                log_cleanup_error("NVAPI VFP frequency lock reset", err);
-            }
-            if let Err(err) =
-                set_pstate_clock_offset_preserve(self.gpu, PState::P0, domain, KilohertzDelta(0))
-            {
-                log_cleanup_error("NVAPI P0 pstate clock offset reset", err);
-            }
-        }
-
-        if let Err(err) = reset_vfp_deltas(self.gpu, VfpResetDomain::All) {
-            log_cleanup_error("NVAPI VFP delta reset", err);
-        }
+        self.cleanup(false);
     }
 }
 
@@ -207,7 +252,7 @@ fn nvml_bad_gpu_rejects() {
 fn nvml_power_current() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
-    let _cleanup = NvmlCleanupGuard::new(&nvml, gpu_id);
+    let mut cleanup = NvmlCleanupGuard::new(&nvml, gpu_id);
     let Some((min_w, current_w, max_w)) = query_nvml_power_watts(&nvml, gpu_id) else {
         return;
     };
@@ -231,6 +276,8 @@ fn nvml_power_current() {
             }
         }
     }
+
+    cleanup.reset_after_write();
 }
 
 #[test]
@@ -274,6 +321,8 @@ fn nvml_offsets_current() {
             }
         }
     }
+
+    cleanup.reset_after_write();
 }
 
 #[test]
@@ -281,7 +330,7 @@ fn nvml_offsets_current() {
 fn nvml_resets() {
     let nvml = nvml();
     let gpu_id = first_gpu_id_nvml(&nvml);
-    let _cleanup = NvmlCleanupGuard::new(&nvml, gpu_id);
+    let mut cleanup = NvmlCleanupGuard::new(&nvml, gpu_id);
 
     for result in [
         reset_nvml_applications_clocks(&nvml, gpu_id),
@@ -297,13 +346,15 @@ fn nvml_resets() {
             );
         }
     }
+
+    cleanup.reset_after_write();
 }
 
 #[test]
 #[ignore]
 fn nvapi_lock_resets() {
     let gpu = first_gpu();
-    let _cleanup = NvapiCleanupGuard::new(&gpu);
+    let mut cleanup = NvapiCleanupGuard::new(&gpu);
 
     for domain in [ClockDomain::Graphics, ClockDomain::Memory] {
         match reset_vfp_frequency_lock(&gpu, domain) {
@@ -316,13 +367,15 @@ fn nvapi_lock_resets() {
             Err(err) => panic!("unexpected NVAPI VFP lock reset error: {err}"),
         }
     }
+
+    cleanup.reset_after_write();
 }
 
 #[test]
 #[ignore]
 fn nvapi_vfp_delta_reset() {
     let gpu = first_gpu();
-    let _cleanup = NvapiCleanupGuard::new(&gpu);
+    let mut cleanup = NvapiCleanupGuard::new(&gpu);
     match reset_vfp_deltas(&gpu, VfpResetDomain::All) {
         Ok(()) => {}
         Err(err) => {
@@ -336,13 +389,15 @@ fn nvapi_vfp_delta_reset() {
             );
         }
     }
+
+    cleanup.reset_after_write();
 }
 
 #[test]
 #[ignore]
 fn nvapi_pstate_zero_delta() {
     let gpu = first_gpu();
-    let _cleanup = NvapiCleanupGuard::new(&gpu);
+    let mut cleanup = NvapiCleanupGuard::new(&gpu);
     for (pstate, domain) in [
         (PState::P0, ClockDomain::Graphics),
         (PState::P0, ClockDomain::Memory),
@@ -362,4 +417,6 @@ fn nvapi_pstate_zero_delta() {
             }
         }
     }
+
+    cleanup.reset_after_write();
 }
