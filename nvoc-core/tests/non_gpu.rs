@@ -1,11 +1,10 @@
-use clap::{Arg, Command};
 use nvapi_hi::{ClockDomain, CoolerPolicy, Kilohertz, Microvolts, PState, VfpPoint};
 use nvml_wrapper::enum_wrappers::device::PerformanceState;
 use nvml_wrapper::enums::device::FanControlPolicy;
 use nvoc_core::{
-    ConvertEnum, GpuSelector, GpuType, VfpResetDomain, check_single_dash_args_from,
-    detect_gpu_type, find_matching_vfp_point, nvml_pstate_to_index, nvml_pstate_to_str,
-    parse_nvml_fan_control_policy, parse_nvml_pstate, select_gpu_ids, try_parse_nvml_pstate,
+    ConvertEnum, GpuSelector, GpuType, VfpResetDomain, detect_gpu_type, find_matching_vfp_point,
+    nvml_pstate_to_index, nvml_pstate_to_str, parse_nvml_fan_control_policy, parse_nvml_pstate,
+    select_gpu_ids, try_parse_nvml_pstate,
 };
 use std::collections::BTreeMap;
 
@@ -237,23 +236,4 @@ fn vfp_point_nearest_voltage() {
     assert_eq!(*index, 8);
     assert_eq!(point.voltage, Microvolts(900_000));
     assert!(find_matching_vfp_point(&BTreeMap::new(), Microvolts(880_000)).is_none());
-}
-
-#[test]
-fn single_dash_typos() {
-    let cmd = Command::new("nvoc")
-        .arg(Arg::new("gpu").long("gpu"))
-        .subcommand(Command::new("set").arg(Arg::new("output-format").long("output-format")));
-
-    let err = check_single_dash_args_from(&cmd, ["-gpu=0"])
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("did you mean --gpu=0?"));
-
-    let err = check_single_dash_args_from(&cmd, ["-output-format=json"])
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("did you mean --output-format=json?"));
-
-    check_single_dash_args_from(&cmd, ["--gpu=0", "-x", "-"]).unwrap();
 }

@@ -1,5 +1,8 @@
-use super::basic_func::handle_reset_nvml_cooler_single_gpu;
 use super::basic_func::local_time_hms;
+use super::basic_func::{
+    handle_lock_vfp, handle_reset_nvml_cooler_single_gpu, handle_test_voltage_limits,
+    voltage_frequency_check,
+};
 use super::human::print_scan_separator;
 use super::oc_profile_function::{
     apply_autoscan_profile, break_point_continue, check_voltage_points, export_single_point,
@@ -11,8 +14,8 @@ use nvapi_hi::Gpu;
 use nvapi_hi::{ClockDomain, KilohertzDelta, PState};
 use nvml_wrapper::Nvml;
 use nvoc_core::{
-    Error, GpuOcParams, core_reset_vfp, fetch_gpu_type, get_voltage_by_point, handle_lock_vfp,
-    handle_test_voltage_limits, set_vfp_curve, set_vfp_curve_warn, voltage_frequency_check,
+    Error, GpuOcParams, core_reset_vfp, fetch_gpu_type, get_voltage_by_point, set_vfp_curve,
+    set_vfp_curve_warn,
 };
 use std::cmp::min;
 use std::io::Write;
@@ -206,7 +209,7 @@ mod pressure_runner {
 
                             if !cfg.is_legacy_global_offset {
                                 match voltage_frequency_check(
-                                    matches.clone(),
+                                    matches,
                                     cfg.point,
                                     print_scan_separator,
                                 ) {
@@ -457,7 +460,7 @@ fn apply_short_phase_success_step(
 fn pre_load_vf_recheck(matches: &ArgMatches, point: usize) -> Result<(), Error> {
     println!("Waiting for pre-load volt-freq recheck");
     sleep(Duration::from_secs(1));
-    voltage_frequency_check(matches.clone(), point, print_scan_separator)?;
+    voltage_frequency_check(matches, point, print_scan_separator)?;
     Ok(())
 }
 
@@ -1368,7 +1371,7 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
 
         writeln!(l)?;
         println!("Waiting for default volt-freq self-check");
-        voltage_frequency_check(matches.clone(), point, print_scan_separator)
+        voltage_frequency_check(matches, point, print_scan_separator)
             .expect("Failed to read v-f info");
         let mut v;
         let mut default_frequency;

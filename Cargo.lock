@@ -1087,11 +1087,6 @@ dependencies = [
 name = "nvoc-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "clap",
- "csv",
- "num-traits",
- "nvapi",
  "nvapi-hi",
  "nvml-wrapper",
  "quick-error",

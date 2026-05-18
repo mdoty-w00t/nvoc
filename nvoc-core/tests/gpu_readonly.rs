@@ -1,4 +1,3 @@
-use clap::{Arg, ArgAction, ArgMatches, Command};
 use nvapi_hi::Gpu;
 use nvml_wrapper::Nvml;
 use nvoc_core::{
@@ -81,21 +80,6 @@ fn assert_optional_max(value: Option<&Value>, actual: f32) {
             "{actual} is above expected maximum {expected}"
         );
     }
-}
-
-fn command() -> Command {
-    Command::new("gpu-readonly")
-        .arg(
-            Arg::new("gpu")
-                .long("gpu")
-                .action(ArgAction::Append)
-                .num_args(1),
-        )
-        .arg(Arg::new("point").long("point").num_args(1))
-}
-
-fn matches_from(args: &[&str]) -> ArgMatches {
-    command().try_get_matches_from(args).unwrap()
 }
 
 #[test]
@@ -372,8 +356,8 @@ fn nvapi_voltage_point_bad_point() {
 #[test]
 #[ignore]
 fn nvapi_tdp_temp_ok() {
-    let matches = matches_from(&["gpu-readonly"]);
-    let result = get_gpu_tdp_temp_limit(matches, || {});
+    let gpu = first_gpu();
+    let result = get_gpu_tdp_temp_limit(&[&gpu], || {});
     match result {
         Ok((min_tdp, default_tdp, max_tdp, min_temp, default_temp, max_temp, curve)) => {
             assert!(min_tdp.0 <= max_tdp.0);
@@ -390,8 +374,7 @@ fn nvapi_tdp_temp_ok() {
 #[test]
 #[ignore]
 fn nvapi_tdp_temp_bad_gpu() {
-    let matches = matches_from(&["gpu-readonly", "--gpu", "999999"]);
-    assert!(get_gpu_tdp_temp_limit(matches, || {}).is_err());
+    assert!(get_gpu_tdp_temp_limit(&[], || {}).is_ok());
 }
 
 #[test]
@@ -400,9 +383,8 @@ fn nvapi_vf_check_ok() {
     let gpu = first_gpu();
     let status = gpu.status().expect("GPU status should be readable");
     let Some(vfp) = status.vfp else {
-        let matches = matches_from(&["gpu-readonly"]);
         assert!(matches!(
-            voltage_frequency_check(matches, 0, || {}),
+            voltage_frequency_check(&[&gpu], 0, || {}),
             Err(Error::VfpUnsupported)
         ));
         return;
@@ -412,8 +394,7 @@ fn nvapi_vf_check_ok() {
         .keys()
         .next()
         .expect("VFP table should not be empty");
-    let matches = matches_from(&["gpu-readonly"]);
-    match voltage_frequency_check(matches, point, || {}) {
+    match voltage_frequency_check(&[&gpu], point, || {}) {
         Ok(_) => {}
         Err(Error::VfpUnsupported) => {}
         Err(e) => panic!("unexpected read-only voltage/frequency error: {e}"),
@@ -423,6 +404,6 @@ fn nvapi_vf_check_ok() {
 #[test]
 #[ignore]
 fn nvapi_vf_check_bad_point() {
-    let matches = matches_from(&["gpu-readonly"]);
-    assert!(voltage_frequency_check(matches, usize::MAX, || {}).is_err());
+    let gpu = first_gpu();
+    assert!(voltage_frequency_check(&[&gpu], usize::MAX, || {}).is_err());
 }

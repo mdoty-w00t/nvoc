@@ -1,4 +1,5 @@
 use super::autoscan_config::{FixResultConfig, VfpExportConfig};
+use super::basic_func::get_gpu_tdp_temp_limit;
 use super::human::print_scan_separator;
 // oc_set_function
 #[cfg(all(not(windows), not(target_os = "linux")))]
@@ -11,8 +12,8 @@ use nvapi_hi::{
     SensorThrottle,
 };
 use nvoc_core::Error;
+use nvoc_core::set_pstate_base_voltage;
 use nvoc_core::{GpuType, fetch_gpu_type};
-use nvoc_core::{get_gpu_tdp_temp_limit, set_pstate_base_voltage};
 use std::cmp::{Ordering, min};
 use std::collections::HashSet;
 use std::convert::TryFrom;
@@ -27,6 +28,10 @@ use std::thread::sleep;
 use std::time::Duration;
 use std::{fs, iter};
 // Adjust imports as needed
+
+fn csv_error(err: csv::Error) -> Error {
+    Error::Custom(format!("CSV Error: {}", err))
+}
 
 type VoltagePointResume = (
     i32,
@@ -276,11 +281,12 @@ fn collect_domain_vf_points(
 fn extract_default_frequencies(file_path: &str, legacy_flag: bool) -> Result<Vec<u32>, Error> {
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
-        .from_path(file_path)?;
+        .from_path(file_path)
+        .map_err(csv_error)?;
     let mut default_frequencies_load = Vec::new();
 
     for result in rdr.records() {
-        let record = result?;
+        let record = result.map_err(csv_error)?;
         let default_frequency_load: u32 = if legacy_flag {
             // Read only frequency column
             record
@@ -320,7 +326,8 @@ fn update_csv_with_load_and_margin(
 
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
-        .from_path(file_path)?;
+        .from_path(file_path)
+        .map_err(csv_error)?;
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
         .from_writer(File::create(&tmp_path)?);
@@ -334,9 +341,9 @@ fn update_csv_with_load_and_margin(
         "margin",
         "margin_bin",
     ]);
-    wtr.write_record(&headers)?;
+    wtr.write_record(&headers).map_err(csv_error)?;
     for (index, result) in rdr.records().enumerate() {
-        let record = result?;
+        let record = result.map_err(csv_error)?;
         let voltage = &record[0];
         let frequency = &record[1];
         let delta = &record[2];
@@ -360,7 +367,8 @@ fn update_csv_with_load_and_margin(
             &default_frequency_load.to_string(),
             &margin.to_string(),
             &margin_bin.to_string(),
-        ])?;
+        ])
+        .map_err(csv_error)?;
     }
 
     wtr.flush()?;
@@ -389,12 +397,12 @@ pub fn patch_vfp_csv_add_column_diff(path: &str, delimiter: u8) -> Result<(), Er
         .delimiter(delimiter)
         .from_reader(reader);
 
-    let headers = csv_reader.headers()?.clone();
+    let headers = csv_reader.headers().map_err(csv_error)?.clone();
     let mut records: Vec<Vec<String>> = Vec::new();
     records.push(headers.iter().map(|s| s.to_string()).collect());
 
     for result in csv_reader.records() {
-        let record = result?;
+        let record = result.map_err(csv_error)?;
         let mut row: Vec<String> = record.iter().map(|s| s.to_string()).collect();
 
         if row.len() >= 4 {
@@ -416,7 +424,7 @@ pub fn patch_vfp_csv_add_column_diff(path: &str, delimiter: u8) -> Result<(), Er
         .from_writer(writer);
 
     for row in records {
-        csv_writer.write_record(&row)?;
+        csv_writer.write_record(&row).map_err(csv_error)?;
     }
     csv_writer.flush()?;
 
@@ -520,10 +528,11 @@ pub fn handle_vfp_export(gpu: &Gpu, matches: &clap::ArgMatches) -> Result<(), Er
 pub fn check_margin_column(file_path: &str, threshold: i32) -> Result<bool, Error> {
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
-        .from_path(file_path)?;
+        .from_path(file_path)
+        .map_err(csv_error)?;
 
     for result in rdr.records() {
-        let record = result?;
+        let record = result.map_err(csv_error)?;
         if let Some(value) = record.get(6) {
             // 7th column (0-based index)
             if abs(value.parse::<i32>().unwrap_or(0)) > threshold {
@@ -1169,7 +1178,8 @@ pub fn key_point_extractor(
 ) -> Result<(usize, usize, usize, usize), Error> {
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
-        .from_path(file_path)?;
+        .from_path(file_path)
+        .map_err(csv_error)?;
 
     let mut maxq_flag = false;
     for gpu in gpus {
@@ -1190,7 +1200,7 @@ pub fn key_point_extractor(
         let mut records: Vec<(usize, u32, u32, i32)> = Vec::new();
 
         for (idx, result) in rdr.records().enumerate() {
-            let record = result?;
+            let record = result.map_err(csv_error)?;
             let voltage: i32 = record[0].parse()?;
             let default_freq: u32 = record[3].parse()?;
             let default_freq_load: u32 = record[4].parse()?;
@@ -1326,7 +1336,7 @@ pub fn apply_autoscan_profile(
     gpu.set_cooler_levels(settings)?;
     println!("Successfully set Cooler1 and Cooler2 to {}%.", cooler_level);
 
-    match get_gpu_tdp_temp_limit(matches.clone(), print_scan_separator) {
+    match get_gpu_tdp_temp_limit(matches, print_scan_separator) {
         Ok((
             _min_tdp_percent,
             _default_tdp_percent,
