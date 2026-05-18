@@ -2,15 +2,15 @@ use nvapi_hi::{ClockDomain, KilohertzDelta, PState};
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::PerformanceState;
 use nvml_wrapper::enums::device::FanControlPolicy;
-use nvoc_core::{
-    Error, GpuSelector, VfpResetDomain, get_nvml_core_clock_vf_offset,
-    get_nvml_mem_clock_vf_offset, get_nvml_pstate_info, get_sorted_gpu_ids_nvml, get_sorted_gpus,
-    parse_nvml_pstate, query_nvml_power_watts, reset_nvml_applications_clocks,
-    reset_nvml_core_locked_clocks, reset_nvml_mem_locked_clocks, reset_vfp_deltas,
-    reset_vfp_frequency_lock, select_gpus, set_default_fan_speed, set_fan_speed,
+use nvoc_core::legacy::{
+    get_nvml_core_clock_vf_offset, get_nvml_mem_clock_vf_offset, get_nvml_pstate_info,
+    get_sorted_gpu_ids_nvml, get_sorted_gpus, parse_nvml_pstate, query_nvml_power_watts,
+    reset_nvml_applications_clocks, reset_nvml_core_locked_clocks, reset_nvml_mem_locked_clocks,
+    reset_vfp_deltas, reset_vfp_frequency_lock, select_gpus, set_default_fan_speed, set_fan_speed,
     set_nvml_core_clock_vf_offset, set_nvml_core_locked_clocks, set_nvml_mem_clock_vf_offset,
     set_nvml_mem_locked_clocks, set_nvml_power_limit, set_pstate_clock_offset_preserve,
 };
+use nvoc_core::{Error, GpuSelector, VfpResetDomain};
 
 const INVALID_GPU_ID: u32 = u32::MAX - 255;
 

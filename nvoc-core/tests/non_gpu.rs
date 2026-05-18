@@ -1,10 +1,12 @@
 use nvapi_hi::{ClockDomain, CoolerPolicy, Kilohertz, Microvolts, PState, VfpPoint};
 use nvml_wrapper::enum_wrappers::device::PerformanceState;
 use nvml_wrapper::enums::device::FanControlPolicy;
+use nvoc_core::legacy::select_gpu_ids;
 use nvoc_core::{
-    ConvertEnum, GpuSelector, GpuType, VfpResetDomain, detect_gpu_type, find_matching_vfp_point,
+    BackendSet, ConvertEnum, GpuId, GpuOperation, GpuSelector, GpuTarget, GpuType, OperationKind,
+    QueryPowerLimits, VfpResetDomain, detect_gpu_type, find_matching_vfp_point,
     nvml_pstate_to_index, nvml_pstate_to_str, parse_nvml_fan_control_policy, parse_nvml_pstate,
-    select_gpu_ids, try_parse_nvml_pstate,
+    run, try_parse_nvml_pstate,
 };
 use std::collections::BTreeMap;
 
@@ -28,7 +30,7 @@ fn pstate_parse_forms() {
 fn pstate_format_roundtrip() {
     for index in 0..=15 {
         let raw = format!("P{index}");
-        let pstate = parse_nvml_pstate(&raw);
+        let pstate = parse_nvml_pstate(&raw).unwrap();
 
         assert_eq!(nvml_pstate_to_index(pstate).unwrap(), index);
         assert_eq!(nvml_pstate_to_str(pstate), raw);
@@ -236,4 +238,19 @@ fn vfp_point_nearest_voltage() {
     assert_eq!(*index, 8);
     assert_eq!(point.voltage, Microvolts(900_000));
     assert!(find_matching_vfp_point(&BTreeMap::new(), Microvolts(880_000)).is_none());
+}
+
+#[test]
+fn structured_operation_requires_matching_backend() {
+    let target = GpuTarget {
+        id: GpuId(0x100),
+        index: 0,
+        nvapi: None,
+        nvml: None,
+    };
+
+    let err = run(&target, QueryPowerLimits).unwrap_err().to_string();
+    assert!(err.contains("has no NVML backend"));
+    assert_eq!(QueryPowerLimits.kind(), OperationKind::QueryPowerLimits);
+    assert_eq!(BackendSet::Both, BackendSet::Both);
 }

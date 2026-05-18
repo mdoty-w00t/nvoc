@@ -1,13 +1,14 @@
 use nvapi_hi::Gpu;
 use nvml_wrapper::Nvml;
-use nvoc_core::{
-    Error, GpuSelector, fetch_gpu_type, get_gpu_tdp_temp_limit, get_nvml_core_clock_vf_offset,
-    get_nvml_mem_clock_vf_offset, get_nvml_min_max_fan_speed, get_nvml_num_fans,
-    get_nvml_pstate_info, get_nvml_supported_applications_clocks, get_nvml_temperature_thresholds,
-    get_sorted_gpu_ids_nvml, get_sorted_gpus, get_voltage_by_point, nvml_pstate_to_str,
-    query_nvml_power_watts, query_nvml_power_watts_by_pci, select_gpu_ids, select_gpus, single_gpu,
+use nvoc_core::legacy::{
+    get_gpu_tdp_temp_limit, get_nvml_core_clock_vf_offset, get_nvml_mem_clock_vf_offset,
+    get_nvml_min_max_fan_speed, get_nvml_num_fans, get_nvml_pstate_info,
+    get_nvml_supported_applications_clocks, get_nvml_temperature_thresholds,
+    get_sorted_gpu_ids_nvml, get_sorted_gpus, get_voltage_by_point, query_nvml_power_watts,
+    query_nvml_power_watts_by_pci, select_gpu_ids, select_gpus, single_gpu,
     voltage_frequency_check,
 };
+use nvoc_core::{Error, GpuSelector, fetch_gpu_type, nvml_pstate_to_str};
 use serde_json::Value;
 use std::env;
 use std::fs;
@@ -212,7 +213,7 @@ fn nvml_offsets_ok() {
 #[ignore]
 fn nvml_offsets_bad_gpu() {
     let nvml = nvml();
-    let pstate = nvoc_core::parse_nvml_pstate("P0");
+    let pstate = nvoc_core::parse_nvml_pstate("P0").unwrap();
     assert!(get_nvml_core_clock_vf_offset(&nvml, INVALID_GPU_ID, pstate).is_none());
     assert!(get_nvml_mem_clock_vf_offset(&nvml, INVALID_GPU_ID, pstate).is_none());
 }

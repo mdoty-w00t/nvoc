@@ -12,7 +12,7 @@ use nvapi_hi::{
     SensorThrottle,
 };
 use nvoc_core::Error;
-use nvoc_core::set_pstate_base_voltage;
+use nvoc_core::legacy::set_pstate_base_voltage;
 use nvoc_core::{GpuType, fetch_gpu_type};
 use std::cmp::{Ordering, min};
 use std::collections::HashSet;

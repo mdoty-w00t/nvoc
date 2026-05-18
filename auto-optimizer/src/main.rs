@@ -20,10 +20,11 @@ use basic_func::{
 };
 use cli_types::OutputFormat;
 use nvml_wrapper::Nvml;
-use nvoc_core::{
-    ConvertEnum, GpuSelector, get_sorted_gpu_ids_nvml, get_sorted_gpus, select_gpu_ids,
-    select_gpus, set_legacy_clocks_nvapi, single_gpu,
+use nvoc_core::legacy::{
+    get_sorted_gpu_ids_nvml, get_sorted_gpus, select_gpu_ids, select_gpus, set_legacy_clocks_nvapi,
+    single_gpu,
 };
+use nvoc_core::{ConvertEnum, GpuSelector};
 use oc_profile_function::{
     export_vfp_from_log, fix_result, handle_vfp_export, handle_vfp_import, sync_memory_pstate_as_p0,
 };

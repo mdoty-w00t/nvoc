@@ -13,10 +13,8 @@ use num_traits::pow;
 use nvapi_hi::Gpu;
 use nvapi_hi::{ClockDomain, KilohertzDelta, PState};
 use nvml_wrapper::Nvml;
-use nvoc_core::{
-    Error, GpuOcParams, core_reset_vfp, fetch_gpu_type, get_voltage_by_point, set_vfp_curve,
-    set_vfp_curve_warn,
-};
+use nvoc_core::legacy::{core_reset_vfp, get_voltage_by_point, set_vfp_curve, set_vfp_curve_warn};
+use nvoc_core::{Error, GpuOcParams, fetch_gpu_type};
 use std::cmp::min;
 use std::io::Write;
 use std::path::Path;
