@@ -1,15 +1,16 @@
 use super::cli_types::{OutputFormat, ResetSettings};
 use super::human;
 use nvapi_hi::{
-    Celsius, Gpu, GpuSettings, KilohertzDelta, MicrovoltsDelta, PState, Percentage,
-    allowable_result,
+    Celsius, ClockDomain, CoolerPolicy, Gpu, GpuSettings, Kilohertz, KilohertzDelta, Microvolts,
+    MicrovoltsDelta, PState, Percentage, allowable_result,
 };
 use std::io;
 
 use clap::ArgMatches;
 use nvoc_core::ConvertEnum;
 use nvoc_core::Error;
-use nvoc_core::{VfpResetDomain, reset_all_pstate_base_voltages, reset_vfp_deltas};
+use nvoc_core::VfpResetDomain;
+use nvoc_core::legacy::{get_sorted_gpus, reset_all_pstate_base_voltages, reset_vfp_deltas};
 use time::{OffsetDateTime, format_description::parse};
 
 pub fn local_time_hms() -> String {
@@ -30,7 +31,398 @@ use std::str::FromStr;
 use std::thread::sleep;
 use std::time::Duration;
 
-use nvoc_core::{fetch_gpu_type, get_sorted_gpus};
+use nvoc_core::fetch_gpu_type;
+
+fn collect_long_flags(cmd: &clap::Command, out: &mut Vec<String>) {
+    for arg in cmd.get_arguments() {
+        if let Some(long) = arg.get_long() {
+            out.push(long.to_string());
+        }
+    }
+    for sub in cmd.get_subcommands() {
+        collect_long_flags(sub, out);
+    }
+}
+
+pub fn check_single_dash_args_from<I, S>(
+    cmd: &clap::Command,
+    args: I,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut known_longs: Vec<String> = Vec::new();
+    collect_long_flags(cmd, &mut known_longs);
+
+    for arg in args {
+        let arg = arg.as_ref();
+        if !arg.starts_with('-') || arg.starts_with("--") || arg == "-" {
+            continue;
+        }
+
+        let body = arg.trim_start_matches('-');
+        let flag_name = body.split('=').next().unwrap_or(body);
+
+        if known_longs.iter().any(|l| l == flag_name) {
+            return Err(format!("invalid option {:?} -- did you mean --{}?", arg, body).into());
+        }
+    }
+    Ok(())
+}
+
+pub fn check_single_dash_args(cmd: &clap::Command) -> Result<(), Box<dyn std::error::Error>> {
+    check_single_dash_args_from(cmd, std::env::args().skip(1))
+}
+
+fn json_error(err: serde_json::Error) -> Error {
+    Error::Custom(format!("JSON Error: {}", err))
+}
+
+fn parse_clock_domain(raw: Option<&String>) -> Result<ClockDomain, Error> {
+    match raw.map(|s| s.as_str()).unwrap_or("Graphics") {
+        "Graphics" => Ok(ClockDomain::Graphics),
+        "Memory" => Ok(ClockDomain::Memory),
+        other => ClockDomain::from_str(other)
+            .map_err(|e| Error::from(format!("Invalid --domain value '{}': {}", other, e))),
+    }
+}
+
+fn parse_lock_frequency(
+    matches: &ArgMatches,
+) -> Result<(ClockDomain, Kilohertz, Option<Kilohertz>), Error> {
+    let raw_targets = matches
+        .get_many::<String>("clock")
+        .ok_or_else(|| Error::from("Missing --clock <UPPER_MHZ> [LOWER_MHZ] value"))?
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>();
+
+    let upper_mhz = raw_targets[0]
+        .parse::<u32>()
+        .map_err(|_| Error::from("In --clock mode, UPPER_MHZ must be an integer MHz value"))?;
+
+    let lower_mhz =
+        if raw_targets.len() >= 2 {
+            Some(raw_targets[1].parse::<u32>().map_err(|_| {
+                Error::from("In --clock mode, LOWER_MHZ must be an integer MHz value")
+            })?)
+        } else {
+            None
+        };
+
+    if let Some(lower) = lower_mhz
+        && lower > upper_mhz
+    {
+        return Err(Error::from(
+            "--clock expects upper bound first and lower bound second",
+        ));
+    }
+
+    Ok((
+        parse_clock_domain(matches.get_one::<String>("domain"))?,
+        Kilohertz(upper_mhz.saturating_mul(1000)),
+        lower_mhz.map(|v| Kilohertz(v.saturating_mul(1000))),
+    ))
+}
+
+fn parse_lock_voltage(
+    gpu: &Gpu,
+    matches: &ArgMatches,
+    default_point: usize,
+) -> Result<nvoc_core::legacy::VfpLockRequest, Error> {
+    let raw_target = matches
+        .get_one::<String>("point")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    if matches
+        .try_get_one::<bool>("voltage")
+        .is_ok_and(|v| v.copied().unwrap_or(false))
+    {
+        const MIN_LOCK_UV: u32 = 500_000;
+        const MAX_LOCK_UV: u32 = 2_000_000;
+
+        let input_voltage = raw_target.parse::<u32>()?;
+        let voltage_uv = if input_voltage >= 10_000 {
+            input_voltage
+        } else {
+            input_voltage.saturating_mul(1000)
+        };
+
+        if !(MIN_LOCK_UV..=MAX_LOCK_UV).contains(&voltage_uv) {
+            return Err(Error::from(format!(
+                "--voltage {} µV is outside the supported range {}–{} µV (0.5–2.0 V)",
+                voltage_uv, MIN_LOCK_UV, MAX_LOCK_UV
+            )));
+        }
+
+        Ok(nvoc_core::legacy::VfpLockRequest::Voltage(Microvolts(
+            voltage_uv,
+        )))
+    } else {
+        let point = raw_target.parse::<usize>().unwrap_or(default_point);
+        nvoc_core::legacy::get_voltage_by_point(gpu, point)?;
+        Ok(nvoc_core::legacy::VfpLockRequest::VoltagePoint(point))
+    }
+}
+
+fn parse_nvapi_locked_clock_range(
+    matches: &ArgMatches,
+    key: &str,
+) -> Result<Option<(u32, u32)>, Error> {
+    let Some(raw) = matches.get_many::<String>(key) else {
+        return Ok(None);
+    };
+
+    let (invalid_msg, count_msg, order_msg) = if key == "locked_core_clocks" {
+        (
+            "Invalid --locked-core-clocks value: expected integer MHz",
+            "Invalid arguments for --nvapi-locked-core-clocks, expected 2 values (MIN_MHZ MAX_MHZ)",
+            "--nvapi-locked-core-clocks expects MIN_MHZ <= MAX_MHZ",
+        )
+    } else {
+        (
+            "Invalid --locked-mem-clocks value: expected integer MHz",
+            "Invalid arguments for --nvapi-locked-mem-clocks, expected 2 values (MIN_MHZ MAX_MHZ)",
+            "--nvapi-locked-mem-clocks expects MIN_MHZ <= MAX_MHZ",
+        )
+    };
+
+    let clocks = raw
+        .map(|s| u32::from_str(s.as_str()).map_err(|_| Error::from(invalid_msg)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if clocks.len() != 2 {
+        return Err(Error::from(count_msg));
+    }
+
+    let min_clock = clocks[0];
+    let max_clock = clocks[1];
+    if min_clock > max_clock {
+        return Err(Error::from(order_msg));
+    }
+
+    Ok(Some((min_clock, max_clock)))
+}
+
+pub fn handle_lock_vfp(
+    gpus: &[&Gpu],
+    matches: &ArgMatches,
+    default_point: usize,
+    feedback_flag: bool,
+) -> Result<(), Error> {
+    if let Some(locked_voltage_raw) = matches.get_one::<String>("locked_voltage") {
+        let target = nvoc_core::parse_nvapi_locked_voltage_target(locked_voltage_raw.as_str())?;
+        for gpu in gpus {
+            let gpu_info = gpu.info()?;
+            let request = match target {
+                nvoc_core::NvapiLockedVoltageTarget::Point(point) => {
+                    nvoc_core::legacy::VfpLockRequest::VoltagePoint(point)
+                }
+                nvoc_core::NvapiLockedVoltageTarget::Voltage(v) => {
+                    nvoc_core::legacy::VfpLockRequest::Voltage(v)
+                }
+            };
+            match nvoc_core::legacy::lock_vfp(&[*gpu], request, false) {
+                Ok(_) => match target {
+                    nvoc_core::NvapiLockedVoltageTarget::Point(point) => {
+                        let voltage = nvoc_core::legacy::get_voltage_by_point(gpu, point)?;
+                        println!(
+                            "Successfully locked GPU {} on VFP point {} ({} mV)",
+                            gpu_info.id,
+                            point,
+                            voltage.0 / 1000
+                        );
+                    }
+                    nvoc_core::NvapiLockedVoltageTarget::Voltage(v) => println!(
+                        "Successfully applied NVAPI locked voltage {} mV to GPU {}",
+                        v.0 / 1000,
+                        gpu_info.id
+                    ),
+                },
+                Err(e) => eprintln!(
+                    "Failed to set NVAPI locked voltage for GPU {}: {:?}",
+                    gpu_info.id, e
+                ),
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some((min_clock, max_clock)) =
+        parse_nvapi_locked_clock_range(matches, "locked_core_clocks")?
+    {
+        for gpu in gpus {
+            let gpu_info = gpu.info()?;
+            match nvoc_core::legacy::set_vfp_frequency_lock(
+                gpu,
+                ClockDomain::Graphics,
+                Kilohertz(max_clock.saturating_mul(1000)),
+                Some(Kilohertz(min_clock.saturating_mul(1000))),
+            ) {
+                Ok(_) => println!(
+                    "Successfully locked NVAPI core clocks (Min: {}, Max: {}) to GPU {}",
+                    min_clock, max_clock, gpu_info.id
+                ),
+                Err(e) => eprintln!(
+                    "Failed to lock NVAPI core clocks for GPU {}: {:?}",
+                    gpu_info.id, e
+                ),
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some((min_clock, max_clock)) =
+        parse_nvapi_locked_clock_range(matches, "locked_mem_clocks")?
+    {
+        for gpu in gpus {
+            let gpu_info = gpu.info()?;
+            match nvoc_core::legacy::set_vfp_frequency_lock(
+                gpu,
+                ClockDomain::Memory,
+                Kilohertz(max_clock.saturating_mul(1000)),
+                Some(Kilohertz(min_clock.saturating_mul(1000))),
+            ) {
+                Ok(_) => println!(
+                    "Successfully locked NVAPI memory clocks (Min: {}, Max: {}) to GPU {}",
+                    min_clock, max_clock, gpu_info.id
+                ),
+                Err(e) => eprintln!(
+                    "Failed to lock NVAPI memory clocks for GPU {}: {:?}",
+                    gpu_info.id, e
+                ),
+            }
+        }
+        return Ok(());
+    }
+
+    if matches.get_one::<String>("clock").is_some() {
+        if matches
+            .try_get_one::<bool>("voltage")
+            .is_ok_and(|v| v.copied().unwrap_or(false))
+        {
+            return Err(Error::from("Cannot use --clock and --voltage together"));
+        }
+
+        let (domain, upper, lower) = parse_lock_frequency(matches)?;
+        return nvoc_core::legacy::lock_vfp(
+            gpus,
+            nvoc_core::legacy::VfpLockRequest::Frequency {
+                domain,
+                upper,
+                lower,
+            },
+            feedback_flag,
+        );
+    }
+
+    let request = parse_lock_voltage(
+        gpus.first().ok_or_else(|| Error::from("no GPU selected"))?,
+        matches,
+        default_point,
+    )?;
+    nvoc_core::legacy::lock_vfp(gpus, request, feedback_flag)
+}
+
+pub fn handle_test_voltage_limits(
+    gpus: &[&Gpu],
+    _matches: &ArgMatches,
+    print_separator: impl FnMut(),
+) -> Result<(usize, usize), Error> {
+    nvoc_core::legacy::handle_test_voltage_limits(gpus, print_separator)
+}
+
+pub fn voltage_frequency_check(
+    matches: &ArgMatches,
+    point: usize,
+    print_separator: impl FnMut(),
+) -> Result<bool, Error> {
+    let selector = match matches.get_many::<String>("gpu") {
+        Some(values) => nvoc_core::GpuSelector::from_specs(values.cloned()),
+        None => nvoc_core::GpuSelector::all(),
+    };
+    let gpu_list = nvoc_core::legacy::get_sorted_gpus()?;
+    let gpus = nvoc_core::legacy::select_gpus(&gpu_list, &selector)?;
+    nvoc_core::legacy::voltage_frequency_check(&gpus, point, print_separator)
+}
+
+pub fn get_gpu_tdp_temp_limit(
+    matches: &ArgMatches,
+    print_separator: impl FnMut(),
+) -> Result<nvoc_core::legacy::GpuTdpTempLimits, Error> {
+    let selector = match matches.get_many::<String>("gpu") {
+        Some(values) => nvoc_core::GpuSelector::from_specs(values.cloned()),
+        None => nvoc_core::GpuSelector::all(),
+    };
+    let gpu_list = nvoc_core::legacy::get_sorted_gpus()?;
+    let gpus = nvoc_core::legacy::select_gpus(&gpu_list, &selector)?;
+    nvoc_core::legacy::get_gpu_tdp_temp_limit(&gpus, print_separator)
+}
+
+pub fn handle_cooler_command(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
+    let policy_raw = matches
+        .get_one::<String>("policy")
+        .ok_or_else(|| Error::from("Missing required argument: --policy <MODE>"))?;
+    let mode = match policy_raw.to_ascii_lowercase().as_str() {
+        "continuous" => CoolerPolicy::from_str("continuous")?,
+        "manual" => CoolerPolicy::from_str("manual")?,
+        "auto" => CoolerPolicy::from_str("continuous")?,
+        _ => CoolerPolicy::from_str(policy_raw.as_str())?,
+    };
+    let level = matches
+        .get_one::<u32>("level")
+        .copied()
+        .ok_or_else(|| Error::from("Missing required argument: --level <LEVEL>"))?;
+    let target = match matches
+        .get_one::<String>("id")
+        .map(|s| s.as_str())
+        .unwrap_or("all")
+    {
+        "1" => nvoc_core::legacy::CoolerTarget::Cooler1,
+        "2" => nvoc_core::legacy::CoolerTarget::Cooler2,
+        _ => nvoc_core::legacy::CoolerTarget::All,
+    };
+
+    nvoc_core::legacy::set_cooler_levels(gpus, mode, level, target)
+}
+
+pub fn single_point_adj(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
+    let point_start = *matches.get_one::<u32>("point_start").unwrap() as usize;
+    let delta_ini = *matches.get_one::<i32>("delta").unwrap();
+    nvoc_core::legacy::adjust_single_vfp_point(gpus, point_start, delta_ini)
+}
+
+pub fn handle_pointwiseoc(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
+    let range_str = matches
+        .get_one::<String>("range")
+        .ok_or_else(|| Error::from("Missing required argument: RANGE"))?;
+    let parts = range_str.splitn(2, '-').collect::<Vec<_>>();
+    if parts.len() != 2 {
+        return Err(Error::from(format!(
+            "Invalid RANGE format '{}'. Expected 'start-end', e.g. '39-76'.",
+            range_str
+        )));
+    }
+
+    let start = parts[0].trim().parse::<usize>().map_err(|_| {
+        Error::from(format!(
+            "Invalid range start '{}': must be a non-negative integer",
+            parts[0]
+        ))
+    })?;
+    let end = parts[1].trim().parse::<usize>().map_err(|_| {
+        Error::from(format!(
+            "Invalid range end '{}': must be a non-negative integer",
+            parts[1]
+        ))
+    })?;
+    let delta = *matches
+        .get_one::<i32>("delta")
+        .ok_or_else(|| Error::from("Missing required argument: DELTA"))?;
+
+    nvoc_core::legacy::set_pointwise_vfp_delta(gpus, start, end, delta)
+}
 
 pub fn print_all_nvml_gpu_uuid(nvml: &Nvml) -> Result<(), Box<dyn std::error::Error>> {
     // 初始化 NVML
@@ -146,7 +538,7 @@ pub fn handle_info(
                         };
                         let gpu_file_path = format!("{}_gpu{}.json", file_path, info.id);
                         let file = std::fs::File::create(&gpu_file_path)?;
-                        serde_json::to_writer_pretty(file, &info)?;
+                        serde_json::to_writer_pretty(file, &info).map_err(json_error)?;
                         human::print_scan_separator();
                         println!(
                             "GPU {} information has been saved to: {}",
@@ -177,7 +569,7 @@ pub fn handle_info(
                             "No selected GPU returned usable NvAPI info".to_string(),
                         ));
                     }
-                    serde_json::to_writer_pretty(io::stdout(), &gpu_info)?;
+                    serde_json::to_writer_pretty(io::stdout(), &gpu_info).map_err(json_error)?;
                 }
             }
         }
@@ -300,7 +692,10 @@ pub fn handle_status(
                         human::print_settings(gpu, requires_set(gpu, &mut set)?);
                         if let Ok(info) = gpu.info()
                             && let Some(thresholds) = nvml.and_then(|n| {
-                                nvoc_core::get_nvml_temperature_thresholds(n, info.id as u32)
+                                nvoc_core::legacy::get_nvml_temperature_thresholds(
+                                    n,
+                                    info.id as u32,
+                                )
                             })
                         {
                             println!("NVML Temperature Thresholds:");
@@ -454,12 +849,14 @@ pub fn handle_get(gpus: &[&Gpu], oformat: OutputFormat) -> Result<(), Error> {
                 }
                 if let Ok(info) = gpu.info() {
                     let gpu_id = info.id as u32;
-                    let power_limit = nvoc_core::query_nvml_power_watts(&nvml, gpu_id);
-                    let temp_thresholds = nvoc_core::get_nvml_temperature_thresholds(&nvml, gpu_id);
-                    let pstate_info = nvoc_core::get_nvml_pstate_info(&nvml, gpu_id);
+                    let power_limit = nvoc_core::legacy::query_nvml_power_watts(&nvml, gpu_id);
+                    let temp_thresholds =
+                        nvoc_core::legacy::get_nvml_temperature_thresholds(&nvml, gpu_id);
+                    let pstate_info = nvoc_core::legacy::get_nvml_pstate_info(&nvml, gpu_id);
                     let app_clocks =
-                        nvoc_core::get_nvml_supported_applications_clocks(&nvml, gpu_id);
-                    let min_max_fan_speed = nvoc_core::get_nvml_min_max_fan_speed(&nvml, gpu_id);
+                        nvoc_core::legacy::get_nvml_supported_applications_clocks(&nvml, gpu_id);
+                    let min_max_fan_speed =
+                        nvoc_core::legacy::get_nvml_min_max_fan_speed(&nvml, gpu_id);
                     if power_limit.is_some()
                         || temp_thresholds.is_some()
                         || pstate_info.is_some()
@@ -499,10 +896,12 @@ pub fn handle_get(gpus: &[&Gpu], oformat: OutputFormat) -> Result<(), Error> {
                                     min_mem, max_mem
                                 );
 
-                                let core_offset =
-                                    nvoc_core::get_nvml_core_clock_vf_offset(&nvml, gpu_id, pstate);
-                                let mem_offset =
-                                    nvoc_core::get_nvml_mem_clock_vf_offset(&nvml, gpu_id, pstate);
+                                let core_offset = nvoc_core::legacy::get_nvml_core_clock_vf_offset(
+                                    &nvml, gpu_id, pstate,
+                                );
+                                let mem_offset = nvoc_core::legacy::get_nvml_mem_clock_vf_offset(
+                                    &nvml, gpu_id, pstate,
+                                );
                                 if let Some(c) = core_offset {
                                     println!("      Core Clock Offset  : {} MHz", c);
                                 }
@@ -512,12 +911,12 @@ pub fn handle_get(gpus: &[&Gpu], oformat: OutputFormat) -> Result<(), Error> {
                             }
                         } else {
                             // Fallback if pstate info is unsupported
-                            let core_offset = nvoc_core::get_nvml_core_clock_vf_offset(
+                            let core_offset = nvoc_core::legacy::get_nvml_core_clock_vf_offset(
                                 &nvml,
                                 gpu_id,
                                 nvml_wrapper::enum_wrappers::device::PerformanceState::Zero,
                             );
-                            let mem_offset = nvoc_core::get_nvml_mem_clock_vf_offset(
+                            let mem_offset = nvoc_core::legacy::get_nvml_mem_clock_vf_offset(
                                 &nvml,
                                 gpu_id,
                                 nvml_wrapper::enum_wrappers::device::PerformanceState::Zero,
@@ -770,14 +1169,18 @@ fn handle_nvapi(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
 
     if let Some(&delta_uv) = matches.get_one::<i32>("voltage_delta") {
         for gpu in gpus {
-            nvoc_core::set_pstate_base_voltage(gpu, MicrovoltsDelta(delta_uv), nvapi_pstate)?;
+            nvoc_core::legacy::set_pstate_base_voltage(
+                gpu,
+                MicrovoltsDelta(delta_uv),
+                nvapi_pstate,
+            )?;
         }
     }
 
     if let Some(&core_offset) = matches.get_one::<i32>("core_offset") {
         for gpu in gpus {
             let gpu_info = gpu.info()?;
-            match nvoc_core::set_pstate_clock_offset_preserve(
+            match nvoc_core::legacy::set_pstate_clock_offset_preserve(
                 gpu,
                 nvapi_pstate,
                 nvapi_hi::ClockDomain::Graphics,
@@ -798,7 +1201,7 @@ fn handle_nvapi(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
     if let Some(&mem_offset) = matches.get_one::<i32>("mem_offset") {
         for gpu in gpus {
             let gpu_info = gpu.info()?;
-            match nvoc_core::set_pstate_clock_offset_preserve(
+            match nvoc_core::legacy::set_pstate_clock_offset_preserve(
                 gpu,
                 nvapi_pstate,
                 nvapi_hi::ClockDomain::Memory,
@@ -830,7 +1233,7 @@ fn handle_nvapi(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
         let nvml = Nvml::init().map_err(|e| Error::Custom(format!("NVML init failed: {:?}", e)))?;
         for gpu in gpus {
             let gpu_info = gpu.info()?;
-            match nvoc_core::set_nvapi_pstate_lock(
+            match nvoc_core::legacy::set_nvapi_pstate_lock(
                 &nvml,
                 gpu,
                 gpu_info.id as u32,
@@ -855,7 +1258,7 @@ fn handle_nvapi(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
         || matches.get_many::<String>("locked_core_clocks").is_some()
         || matches.get_many::<String>("locked_mem_clocks").is_some()
     {
-        nvoc_core::handle_lock_vfp(gpus, matches, 0, false)?;
+        handle_lock_vfp(gpus, matches, 0, false)?;
     }
 
     if matches.get_flag("reset_volt_locks") {
@@ -874,7 +1277,8 @@ fn handle_nvapi(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
     if matches.get_flag("reset_core_clocks") {
         for gpu in gpus {
             let gpu_info = gpu.info()?;
-            match nvoc_core::reset_vfp_frequency_lock(gpu, nvapi_hi::ClockDomain::Graphics) {
+            match nvoc_core::legacy::reset_vfp_frequency_lock(gpu, nvapi_hi::ClockDomain::Graphics)
+            {
                 Ok(_) => println!(
                     "Successfully reset NVAPI core clocks lock on GPU {}",
                     gpu_info.id
@@ -890,7 +1294,7 @@ fn handle_nvapi(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
     if matches.get_flag("reset_mem_clocks") {
         for gpu in gpus {
             let gpu_info = gpu.info()?;
-            match nvoc_core::reset_vfp_frequency_lock(gpu, nvapi_hi::ClockDomain::Memory) {
+            match nvoc_core::legacy::reset_vfp_frequency_lock(gpu, nvapi_hi::ClockDomain::Memory) {
                 Ok(_) => println!(
                     "Successfully reset NVAPI memory clocks lock on GPU {}",
                     gpu_info.id
@@ -904,7 +1308,7 @@ fn handle_nvapi(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
     }
 
     if matches.get_flag("test_limit") {
-        nvoc_core::handle_test_voltage_limits(gpus, matches, human::print_scan_separator)?;
+        handle_test_voltage_limits(gpus, matches, human::print_scan_separator)?;
     }
 
     Ok(())
@@ -916,11 +1320,11 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
         .get_one::<String>("pstate")
         .map(|s| s.as_str())
         .unwrap_or("0");
-    let target_nvml_pstate = nvoc_core::parse_nvml_pstate(nvml_pstate_val);
+    let target_nvml_pstate = nvoc_core::legacy::parse_nvml_pstate(nvml_pstate_val);
 
     if let Some(&core_offset) = matches.get_one::<i32>("core_offset") {
         for &gpu_id in gpu_ids {
-            match nvoc_core::set_nvml_core_clock_vf_offset(
+            match nvoc_core::legacy::set_nvml_core_clock_vf_offset(
                 &nvml,
                 gpu_id,
                 core_offset,
@@ -937,7 +1341,7 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
 
     if let Some(&mem_offset) = matches.get_one::<i32>("mem_offset") {
         for &gpu_id in gpu_ids {
-            match nvoc_core::set_nvml_mem_clock_vf_offset(
+            match nvoc_core::legacy::set_nvml_mem_clock_vf_offset(
                 &nvml,
                 gpu_id,
                 mem_offset,
@@ -954,7 +1358,7 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
 
     if let Some(&power_w) = matches.get_one::<u32>("power_limit") {
         for &gpu_id in gpu_ids {
-            match nvoc_core::set_nvml_power_limit(&nvml, gpu_id, power_w) {
+            match nvoc_core::legacy::set_nvml_power_limit(&nvml, gpu_id, power_w) {
                 Ok(_) => println!(
                     "Successfully applied NVML power limit {} W to GPU {}",
                     power_w, gpu_id
@@ -970,8 +1374,9 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
             let mem_clock = clocks[0];
             let core_clock = clocks[1];
             for &gpu_id in gpu_ids {
-                match nvoc_core::set_nvml_applications_clocks(&nvml, gpu_id, mem_clock, core_clock)
-                {
+                match nvoc_core::legacy::set_nvml_applications_clocks(
+                    &nvml, gpu_id, mem_clock, core_clock,
+                ) {
                     Ok(_) => println!(
                         "Successfully locked NVML app clocks (Mem: {}, Core: {}) to GPU {}",
                         mem_clock, core_clock, gpu_id
@@ -990,7 +1395,7 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
 
     if matches.get_flag("reset_app_clocks") {
         for &gpu_id in gpu_ids {
-            match nvoc_core::reset_nvml_applications_clocks(&nvml, gpu_id) {
+            match nvoc_core::legacy::reset_nvml_applications_clocks(&nvml, gpu_id) {
                 Ok(_) => println!(
                     "Successfully reset NVML applications clocks to default on GPU {}",
                     gpu_id
@@ -1009,7 +1414,9 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
             let min_clock = clocks[0];
             let max_clock = clocks[1];
             for &gpu_id in gpu_ids {
-                match nvoc_core::set_nvml_core_locked_clocks(&nvml, gpu_id, min_clock, max_clock) {
+                match nvoc_core::legacy::set_nvml_core_locked_clocks(
+                    &nvml, gpu_id, min_clock, max_clock,
+                ) {
                     Ok(_) => println!(
                         "Successfully locked NVML core clocks (Min: {}, Max: {}) to GPU {}",
                         min_clock, max_clock, gpu_id
@@ -1029,7 +1436,7 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
 
     if matches.get_flag("reset_core_clocks") {
         for &gpu_id in gpu_ids {
-            match nvoc_core::reset_nvml_core_locked_clocks(&nvml, gpu_id) {
+            match nvoc_core::legacy::reset_nvml_core_locked_clocks(&nvml, gpu_id) {
                 Ok(_) => println!(
                     "Successfully reset NVML core locked clocks to GPU {}",
                     gpu_id
@@ -1048,7 +1455,9 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
             let min_clock = clocks[0];
             let max_clock = clocks[1];
             for &gpu_id in gpu_ids {
-                match nvoc_core::set_nvml_mem_locked_clocks(&nvml, gpu_id, min_clock, max_clock) {
+                match nvoc_core::legacy::set_nvml_mem_locked_clocks(
+                    &nvml, gpu_id, min_clock, max_clock,
+                ) {
                     Ok(_) => println!(
                         "Successfully locked NVML Memory clocks (Min: {}, Max: {}) to GPU {}",
                         min_clock, max_clock, gpu_id
@@ -1078,7 +1487,12 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
         };
 
         for &gpu_id in gpu_ids {
-            match nvoc_core::set_nvml_pstate_lock(&nvml, gpu_id, first_pstate, second_pstate) {
+            match nvoc_core::legacy::set_nvml_pstate_lock(
+                &nvml,
+                gpu_id,
+                first_pstate,
+                second_pstate,
+            ) {
                 Ok((range_label, min_lock_mhz, max_lock_mhz)) => println!(
                     "Successfully locked GPU {} to {} via NVML memory window {}-{} MHz",
                     gpu_id, range_label, min_lock_mhz, max_lock_mhz,
@@ -1095,7 +1509,7 @@ pub fn handle_nvml_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Result<(),
 
     if matches.get_flag("reset_mem_clocks") {
         for &gpu_id in gpu_ids {
-            match nvoc_core::reset_nvml_mem_locked_clocks(&nvml, gpu_id) {
+            match nvoc_core::legacy::reset_nvml_mem_locked_clocks(&nvml, gpu_id) {
                 Ok(_) => println!(
                     "Successfully reset NVML Memory locked clocks to GPU {}",
                     gpu_id
@@ -1137,7 +1551,7 @@ pub fn handle_nvml_cooler_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Res
         .ok_or_else(|| Error::from("Missing required argument: --level <LEVEL>"))?;
 
     for &gpu_id in gpu_ids {
-        let fan_count = nvoc_core::get_nvml_num_fans(&nvml, gpu_id).ok_or_else(|| {
+        let fan_count = nvoc_core::legacy::get_nvml_num_fans(&nvml, gpu_id).ok_or_else(|| {
             Error::Custom(format!("Failed to query NVML fan count for GPU {}", gpu_id))
         })?;
 
@@ -1156,7 +1570,7 @@ pub fn handle_nvml_cooler_with_ids(gpu_ids: &[u32], matches: &ArgMatches) -> Res
         };
 
         for fan_idx in fan_indices {
-            match nvoc_core::set_fan_speed(&nvml, gpu_id, fan_idx, policy, level) {
+            match nvoc_core::legacy::set_fan_speed(&nvml, gpu_id, fan_idx, policy, level) {
                 Ok(_) => println!(
                     "Successfully applied NVML cooler policy {:?}, level {}% to GPU {} fan {}",
                     policy,
@@ -1206,7 +1620,7 @@ pub fn handle_reset_nvml_cooler_single_gpu(
 ) -> Result<(), Error> {
     let gpu_info = gpu.info()?;
     let gpu_id = gpu_info.id as u32;
-    let fan_count = nvoc_core::get_nvml_num_fans(nvml, gpu_id).ok_or_else(|| {
+    let fan_count = nvoc_core::legacy::get_nvml_num_fans(nvml, gpu_id).ok_or_else(|| {
         Error::Custom(format!(
             "Failed to query NVML fan count for GPU {}",
             gpu_info.id
@@ -1228,7 +1642,7 @@ pub fn handle_reset_nvml_cooler_single_gpu(
     };
 
     for fan_idx in fan_indices {
-        match nvoc_core::set_default_fan_speed(nvml, gpu_id, fan_idx) {
+        match nvoc_core::legacy::set_default_fan_speed(nvml, gpu_id, fan_idx) {
             Ok(_) => println!(
                 "Successfully restored NVML default fan speed on GPU {} fan {}",
                 gpu_info.id,

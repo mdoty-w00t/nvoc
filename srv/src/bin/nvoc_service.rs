@@ -25,7 +25,6 @@ fn main() {
 #[cfg(windows)]
 mod nvoc_service {
     use super::websrv::{NVOCServiceCmd, NVOCServiceConfig, start_http_server};
-    use clap::ArgMatches;
     use futures_util::StreamExt;
     use gag::Redirect;
     use log::{LevelFilter, error, info, warn};
@@ -36,7 +35,8 @@ mod nvoc_service {
         Nvml,
         enum_wrappers::device::{TemperatureSensor, TemperatureThreshold},
     };
-    use nvoc_core::{find_matching_vfp_point, handle_lock_vfp, reset_vfp_frequency_lock};
+    use nvoc_core::find_matching_vfp_point;
+    use nvoc_core::legacy::{VfpLockRequest, lock_vfp, reset_vfp_frequency_lock};
     use std::{
         cmp::{max, min},
         env,
@@ -345,21 +345,19 @@ mod nvoc_service {
                                 }
                             }
                         }
-                        let pseudo_matches = ArgMatches::default();
-
                         let current = gpu_dynamic_lock_point[idx];
                         if temperature >= temperature_softwall {
                             // 超温：每周期降低一个工作点（收紧），不低于最低限制
                             let next = current.saturating_sub(1).max(vfp_lowest_lock_point);
                             gpu_dynamic_lock_point[idx] = next;
-                            match handle_lock_vfp(&gpu_result, &pseudo_matches, next, true) {
+                            match lock_vfp(&gpu_result, VfpLockRequest::VoltagePoint(next), true) {
                                 Ok(_) => info!("GPU {}: over-temp, stepped down to VFP lock point {}", i, next),
                                 Err(e) => error!("GPU {}: failed to lock VFP: {:?}", i, e),
                             }
                         } else if current < vfp_low_lock_point {
                             let next = (current + 1).min(vfp_low_lock_point);
                             gpu_dynamic_lock_point[idx] = next;
-                            match handle_lock_vfp(&gpu_result, &pseudo_matches, next, true) {
+                            match lock_vfp(&gpu_result, VfpLockRequest::VoltagePoint(next), true) {
                                 Ok(_) => info!("GPU {}: temp normal, relaxed to VFP lock point {}", i, next),
                                 Err(e) => error!("GPU {}: failed to relax VFP: {:?}", i, e),
                             }

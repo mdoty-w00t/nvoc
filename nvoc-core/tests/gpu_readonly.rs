@@ -1,13 +1,14 @@
-use clap::{Arg, ArgAction, ArgMatches, Command};
 use nvapi_hi::Gpu;
 use nvml_wrapper::Nvml;
+use nvoc_core::legacy::{
+    get_gpu_tdp_temp_limit, get_nvml_core_clock_vf_offset, get_nvml_mem_clock_vf_offset,
+    get_nvml_min_max_fan_speed, get_nvml_num_fans, get_nvml_pstate_info,
+    get_nvml_supported_applications_clocks, get_nvml_temperature_thresholds,
+    get_sorted_gpu_ids_nvml, get_sorted_gpus, get_voltage_by_point, query_nvml_power_watts,
+    select_gpu_ids, select_gpus, single_gpu, voltage_frequency_check,
+};
 use nvoc_core::{
-    Error, GpuSelector, fetch_gpu_type, get_gpu_tdp_temp_limit, get_nvml_core_clock_vf_offset,
-    get_nvml_mem_clock_vf_offset, get_nvml_min_max_fan_speed, get_nvml_num_fans,
-    get_nvml_pstate_info, get_nvml_supported_applications_clocks, get_nvml_temperature_thresholds,
-    get_sorted_gpu_ids_nvml, get_sorted_gpus, get_voltage_by_point, nvml_pstate_to_str,
-    query_nvml_power_watts, query_nvml_power_watts_by_pci, select_gpu_ids, select_gpus, single_gpu,
-    voltage_frequency_check,
+    Error, GpuId, GpuSelector, fetch_gpu_type, gpu_id_from_nvml_device, nvml_pstate_to_str,
 };
 use serde_json::Value;
 use std::env;
@@ -83,21 +84,6 @@ fn assert_optional_max(value: Option<&Value>, actual: f32) {
     }
 }
 
-fn command() -> Command {
-    Command::new("gpu-readonly")
-        .arg(
-            Arg::new("gpu")
-                .long("gpu")
-                .action(ArgAction::Append)
-                .num_args(1),
-        )
-        .arg(Arg::new("point").long("point").num_args(1))
-}
-
-fn matches_from(args: &[&str]) -> ArgMatches {
-    command().try_get_matches_from(args).unwrap()
-}
-
 #[test]
 #[ignore]
 fn discovery_nvapi_sorted() {
@@ -136,12 +122,25 @@ fn discovery_nvml_ids() {
 
     for id in ids {
         assert_eq!(id % 256, 0, "NVML ids should use NVAPI PCI bus encoding");
+        assert_eq!(GpuId(id).pci_bus().saturating_mul(256), id);
         if let Some(truth) = truth_for_gpu(id)
             && let Some(bus) = truth.get("pci_bus").and_then(Value::as_u64)
         {
             assert_eq!(id / 256, bus as u32);
         }
     }
+}
+
+#[test]
+#[ignore]
+fn discovery_nvml_device_id_conversion() {
+    let nvml = nvml();
+    let ids = get_sorted_gpu_ids_nvml(&nvml).expect("NVML ids should be readable");
+    assert!(!ids.is_empty());
+    let device = nvml
+        .device_by_index(0)
+        .expect("first NVML device should be readable");
+    assert_eq!(gpu_id_from_nvml_device(&device).unwrap().0, ids[0]);
 }
 
 #[test]
@@ -206,7 +205,7 @@ fn nvml_power_ok() {
 fn nvml_power_bad_gpu() {
     let nvml = nvml();
     assert!(query_nvml_power_watts(&nvml, INVALID_GPU_ID).is_none());
-    assert!(query_nvml_power_watts_by_pci("invalid-pci-id").is_none());
+    assert!(GpuId::from_pci_str("invalid-pci-id").is_err());
 }
 
 #[test]
@@ -228,7 +227,7 @@ fn nvml_offsets_ok() {
 #[ignore]
 fn nvml_offsets_bad_gpu() {
     let nvml = nvml();
-    let pstate = nvoc_core::parse_nvml_pstate("P0");
+    let pstate = nvoc_core::parse_nvml_pstate("P0").unwrap();
     assert!(get_nvml_core_clock_vf_offset(&nvml, INVALID_GPU_ID, pstate).is_none());
     assert!(get_nvml_mem_clock_vf_offset(&nvml, INVALID_GPU_ID, pstate).is_none());
 }
@@ -372,8 +371,8 @@ fn nvapi_voltage_point_bad_point() {
 #[test]
 #[ignore]
 fn nvapi_tdp_temp_ok() {
-    let matches = matches_from(&["gpu-readonly"]);
-    let result = get_gpu_tdp_temp_limit(matches, || {});
+    let gpu = first_gpu();
+    let result = get_gpu_tdp_temp_limit(&[&gpu], || {});
     match result {
         Ok((min_tdp, default_tdp, max_tdp, min_temp, default_temp, max_temp, curve)) => {
             assert!(min_tdp.0 <= max_tdp.0);
@@ -389,9 +388,8 @@ fn nvapi_tdp_temp_ok() {
 
 #[test]
 #[ignore]
-fn nvapi_tdp_temp_bad_gpu() {
-    let matches = matches_from(&["gpu-readonly", "--gpu", "999999"]);
-    assert!(get_gpu_tdp_temp_limit(matches, || {}).is_err());
+fn nvapi_tdp_temp_empty_slice() {
+    assert!(get_gpu_tdp_temp_limit(&[], || {}).is_ok());
 }
 
 #[test]
@@ -400,9 +398,8 @@ fn nvapi_vf_check_ok() {
     let gpu = first_gpu();
     let status = gpu.status().expect("GPU status should be readable");
     let Some(vfp) = status.vfp else {
-        let matches = matches_from(&["gpu-readonly"]);
         assert!(matches!(
-            voltage_frequency_check(matches, 0, || {}),
+            voltage_frequency_check(&[&gpu], 0, || {}),
             Err(Error::VfpUnsupported)
         ));
         return;
@@ -412,8 +409,7 @@ fn nvapi_vf_check_ok() {
         .keys()
         .next()
         .expect("VFP table should not be empty");
-    let matches = matches_from(&["gpu-readonly"]);
-    match voltage_frequency_check(matches, point, || {}) {
+    match voltage_frequency_check(&[&gpu], point, || {}) {
         Ok(_) => {}
         Err(Error::VfpUnsupported) => {}
         Err(e) => panic!("unexpected read-only voltage/frequency error: {e}"),
@@ -423,6 +419,6 @@ fn nvapi_vf_check_ok() {
 #[test]
 #[ignore]
 fn nvapi_vf_check_bad_point() {
-    let matches = matches_from(&["gpu-readonly"]);
-    assert!(voltage_frequency_check(matches, usize::MAX, || {}).is_err());
+    let gpu = first_gpu();
+    assert!(voltage_frequency_check(&[&gpu], usize::MAX, || {}).is_err());
 }

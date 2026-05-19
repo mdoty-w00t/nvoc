@@ -1,5 +1,6 @@
 use super::conv::{nvml_pstate_to_index, nvml_pstate_to_str};
 use super::error::Error;
+use super::target::GpuId;
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::PerformanceState;
 use nvml_wrapper::enums::device::FanControlPolicy;
@@ -11,7 +12,7 @@ pub type NvmlPStateClockRange = (PerformanceState, u32, u32, u32, u32);
 // ---------------------------------------------------------------------------
 
 fn find_nvml_device<'n>(nvml: &'n Nvml, gpu_id: u32) -> Option<nvml_wrapper::Device<'n>> {
-    let pci_bus = gpu_id / 256;
+    let pci_bus = GpuId(gpu_id).pci_bus();
     let count = nvml.device_count().ok()?;
     for i in 0..count {
         if let Ok(dev) = nvml.device_by_index(i)
@@ -35,90 +36,6 @@ fn find_nvml_device_err<'n>(
 // ---------------------------------------------------------------------------
 // Power queries
 // ---------------------------------------------------------------------------
-
-/// 通过 NVML 查询指定 GPU 的功率限制（单位：瓦）。
-///
-/// **注意：** 优先使用 `query_nvml_power_watts(nvml, gpu_id)` —— 它更简洁且直接。
-/// 此函数保留作为备用实现（适用于需要从字符串解析 PCI Bus ID 的场景）。
-///
-/// # 参数
-/// - `pci_bus_id_str`: PCI Bus ID 字符串（格式如 "0000:01:00.0" 或 NVAPI 的 "PCIe x16 (1:0...)"）
-///
-/// # 返回
-/// - `Some((min_W, current_W, max_W))`: 成功时返回三个瓦数值
-/// - `None`: NVML 初始化失败或设备不可用时返回
-#[allow(dead_code)]
-pub fn query_nvml_power_watts_by_pci(pci_bus_id_str: &str) -> Option<(f32, f32, f32)> {
-    let nvml = Nvml::init().ok()?;
-
-    // 从 NVAPI 格式提取 PCI Bus 编号
-    // 例如 "PCIe x16 (1:0 routed to IRQ 0)" -> Bus = 1
-    let nvapi_bus_num = if let Some(start) = pci_bus_id_str.find('(') {
-        if let Some(end) = pci_bus_id_str[start..].find(':') {
-            pci_bus_id_str[start + 1..start + end]
-                .trim()
-                .parse::<u32>()
-                .ok()
-        } else {
-            None
-        }
-    } else {
-        // 尝试解析标准格式 "0000:01:00.0"
-        pci_bus_id_str
-            .split(':')
-            .nth(1)
-            .and_then(|s| s.parse::<u32>().ok())
-    };
-
-    // 尝试直接通过 PCI Bus ID 获取设备（可能失败）
-    let device = nvml
-        .device_by_pci_bus_id(pci_bus_id_str)
-        .or_else(|_| {
-            // 降级方案：枚举所有 NVML 设备，匹配 PCI Bus 编号
-            let device_count = nvml.device_count()?;
-
-            for i in 0..device_count {
-                if let Ok(dev) = nvml.device_by_index(i)
-                    && let Ok(pci_info) = dev.pci_info()
-                {
-                    // 匹配策略：比较 PCI Bus 编号
-                    if let Some(target_bus) = nvapi_bus_num
-                        && pci_info.bus == target_bus
-                    {
-                        return Ok(dev);
-                    }
-
-                    // 备用：宽松字符串匹配
-                    let nvml_pci_str = format!(
-                        "{:04x}:{:02x}:{:02x}.0",
-                        pci_info.domain, pci_info.bus, pci_info.device
-                    );
-                    let nvapi_stripped = pci_bus_id_str.trim_start_matches("0000:");
-                    let nvml_stripped = nvml_pci_str.trim_start_matches("0000:");
-                    if nvapi_stripped.eq_ignore_ascii_case(nvml_stripped) {
-                        return Ok(dev);
-                    }
-                }
-            }
-
-            Err(nvml_wrapper::error::NvmlError::NotFound)
-        })
-        .ok()?;
-
-    let current_mw = device.power_management_limit().ok()?;
-    let constraints = device.power_management_limit_constraints();
-
-    let (min_mw, max_mw) = match constraints {
-        Ok(c) => (c.min_limit, c.max_limit),
-        Err(_) => (0, 0),
-    };
-
-    let min_w = min_mw as f32 / 1000.0;
-    let max_w = max_mw as f32 / 1000.0;
-    let current_w = current_mw as f32 / 1000.0;
-
-    Some((min_w, current_w, max_w))
-}
 
 /// Query power limits for a GPU via NVML.
 ///

@@ -1,4 +1,5 @@
 use super::Error;
+use super::target::gpu_id_from_nvml_device;
 use nvapi_hi::Gpu;
 use nvml_wrapper::Nvml;
 use std::str::FromStr;
@@ -17,17 +18,12 @@ impl GpuSelector {
         Self(Some(specs.into_iter().collect()))
     }
 
-    /// Build from clap values at the CLI boundary.
-    pub fn from_clap(values: Option<clap::parser::ValuesRef<'_, String>>) -> Self {
-        Self(values.map(|v| v.cloned().collect()))
-    }
-
     fn specs(&self) -> Option<&[String]> {
         self.0.as_deref()
     }
 }
 
-pub fn single_gpu<'a>(gpus: &[&'a Gpu]) -> anyhow::Result<&'a Gpu, Error> {
+pub fn single_gpu<'a>(gpus: &[&'a Gpu]) -> Result<&'a Gpu, Error> {
     let mut gpus = gpus.iter();
     gpus.next()
         .ok_or_else(|| Error::from("no GPU selected"))
@@ -37,42 +33,39 @@ pub fn single_gpu<'a>(gpus: &[&'a Gpu]) -> anyhow::Result<&'a Gpu, Error> {
         })
 }
 
-fn parse_gpu_id(raw: &str) -> anyhow::Result<usize> {
+fn parse_gpu_id(raw: &str) -> Result<usize, Error> {
     let raw = raw.trim();
 
     if let Some(rest) = raw.strip_prefix("pu=").or_else(|| raw.strip_prefix("pu ")) {
-        anyhow::bail!(
+        return Err(Error::Custom(format!(
             "invalid GPU id {:?} -- did you mean --gpu={}?",
             raw,
             rest.trim()
-        );
+        )));
     }
 
     if !raw.starts_with(|c: char| c.is_ascii_digit()) {
-        anyhow::bail!(
+        return Err(Error::Custom(format!(
             "invalid GPU id {:?}: expected a decimal or hex (0x...) number",
             raw
-        );
+        )));
     }
 
     if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        usize::from_str_radix(hex, 16).map_err(|_| anyhow::anyhow!("invalid hex GPU id {:?}", raw))
+        usize::from_str_radix(hex, 16)
+            .map_err(|_| Error::Custom(format!("invalid hex GPU id {:?}", raw)))
     } else {
-        usize::from_str(raw).map_err(|_| anyhow::anyhow!("invalid decimal GPU id {:?}", raw))
+        usize::from_str(raw).map_err(|_| Error::Custom(format!("invalid decimal GPU id {:?}", raw)))
     }
 }
 
-pub fn select_gpus<'a>(
-    gpus: &'a [Gpu],
-    selector: &GpuSelector,
-) -> anyhow::Result<Vec<&'a Gpu>, Error> {
+pub fn select_gpus<'a>(gpus: &'a [Gpu], selector: &GpuSelector) -> Result<Vec<&'a Gpu>, Error> {
     let selected = match selector.specs() {
         Some(specs) => {
             let inputs = specs
                 .iter()
                 .map(|s| parse_gpu_id(s.as_str()))
-                .collect::<anyhow::Result<Vec<_>, _>>()
-                .map_err(|e| Error::Custom(e.to_string()))?;
+                .collect::<Result<Vec<_>, _>>()?;
 
             let mut selected = Vec::new();
             for input in inputs {
@@ -131,11 +124,7 @@ pub fn get_sorted_gpu_ids_nvml(nvml: &Nvml) -> Result<Vec<u32>, Error> {
         let device = nvml
             .device_by_index(i)
             .map_err(|e| Error::Custom(format!("NVML device_by_index({}) failed: {:?}", i, e)))?;
-        let pci = device
-            .pci_info()
-            .map_err(|e| Error::Custom(format!("NVML pci_info({}) failed: {:?}", i, e)))?;
-
-        gpu_ids.push(pci.bus.saturating_mul(256));
+        gpu_ids.push(gpu_id_from_nvml_device(&device)?.0);
     }
 
     gpu_ids.sort_unstable();
@@ -143,14 +132,13 @@ pub fn get_sorted_gpu_ids_nvml(nvml: &Nvml) -> Result<Vec<u32>, Error> {
     Ok(gpu_ids)
 }
 
-pub fn select_gpu_ids(gpu_ids: &[u32], selector: &GpuSelector) -> anyhow::Result<Vec<u32>, Error> {
+pub fn select_gpu_ids(gpu_ids: &[u32], selector: &GpuSelector) -> Result<Vec<u32>, Error> {
     let selected = match selector.specs() {
         Some(specs) => {
             let inputs = specs
                 .iter()
                 .map(|s| parse_gpu_id(s.as_str()))
-                .collect::<anyhow::Result<Vec<_>, _>>()
-                .map_err(|e| Error::Custom(e.to_string()))?;
+                .collect::<Result<Vec<_>, _>>()?;
 
             let mut selected = Vec::new();
             for input in inputs {

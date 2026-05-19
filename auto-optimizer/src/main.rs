@@ -14,16 +14,17 @@ mod platform;
 
 use anyhow::Result;
 use basic_func::{
-    handle_get, handle_info, handle_list, handle_nvml_cooler_with_ids, handle_nvml_with_ids,
-    handle_reset, handle_reset_nvml_cooler, handle_set_command, handle_status,
+    check_single_dash_args, handle_cooler_command, handle_get, handle_info, handle_list,
+    handle_nvml_cooler_with_ids, handle_nvml_with_ids, handle_pointwiseoc, handle_reset,
+    handle_reset_nvml_cooler, handle_set_command, handle_status, single_point_adj,
 };
 use cli_types::OutputFormat;
 use nvml_wrapper::Nvml;
-use nvoc_core::{
-    ConvertEnum, GpuSelector, check_single_dash_args, get_sorted_gpu_ids_nvml, get_sorted_gpus,
-    handle_cooler_command, handle_pointwiseoc, select_gpu_ids, select_gpus,
-    set_legacy_clocks_nvapi, single_gpu, single_point_adj,
+use nvoc_core::legacy::{
+    get_sorted_gpu_ids_nvml, get_sorted_gpus, select_gpu_ids, select_gpus, set_legacy_clocks_nvapi,
+    single_gpu,
 };
+use nvoc_core::{ConvertEnum, GpuSelector};
 use oc_profile_function::{
     export_vfp_from_log, fix_result, handle_vfp_export, handle_vfp_import, sync_memory_pstate_as_p0,
 };
@@ -83,7 +84,10 @@ fn main_result() -> Result<i32, Box<dyn std::error::Error>> {
         .unwrap()?;
 
     // Build GPU selector from the --gpu argument (CLI-agnostic after this point).
-    let selector = GpuSelector::from_clap(matches.get_many::<String>("gpu"));
+    let selector = match matches.get_many::<String>("gpu") {
+        Some(values) => GpuSelector::from_specs(values.cloned()),
+        None => GpuSelector::all(),
+    };
 
     // Enumerate both backends once, then resolve the selection upfront.
     // Handlers receive already-selected handles and do not filter themselves.

@@ -1,6 +1,6 @@
 use nvapi_hi::{ClockDomain, CoolerControl, Gpu, GpuInfo, GpuSettings, GpuStatus, MicrovoltsDelta};
 use nvml_wrapper::Nvml;
-use nvoc_core::query_nvml_power_watts;
+use nvoc_core::legacy::query_nvml_power_watts;
 use std::iter;
 
 const HEADER_LEN: usize = 20;
