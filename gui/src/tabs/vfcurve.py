@@ -75,6 +75,8 @@ class VFCurveTab:
         self._auto_refresh_interval_ms = self._DEFAULT_AUTO_REFRESH_INTERVAL_MS
         self._auto_interval_var = ctk.StringVar(value="1.0")
         self._auto_toggle_btn = None
+        self._io_path_var = ctk.StringVar(value="")
+        self.quick_export_var = ctk.BooleanVar(value=True)
 
         # ── Top: chart area (controls row + plot) ──
         chart_area = ctk.CTkFrame(self.frame, fg_color="transparent")
@@ -90,6 +92,23 @@ class VFCurveTab:
         ).pack(side="left", padx=8)
         auto_row = ctk.CTkFrame(chart_top, fg_color="transparent")
         auto_row.pack(side="right")
+        LiteButton(auto_row, text="📤 Export", width=90, command=self._export_vfp).pack(
+            side="left", padx=(0, 5)
+        )
+        LiteButton(auto_row, text="📥 Import", width=90, command=self._import_vfp).pack(
+            side="left", padx=(0, 5)
+        )
+        LiteButton(
+            auto_row,
+            text="⭮ RESET",
+            width=80,
+            fg_color="#c0392b",
+            hover_color="#96281b",
+            command=self._reset_vfp,
+        ).pack(side="left", padx=(0, 5))
+        LiteButton(auto_row, text="...", width=34, command=self._browse_csv).pack(
+            side="left", padx=(0, 8)
+        )
         self._auto_toggle_btn = ctk.CTkButton(
             auto_row, text="▶ Auto", width=82, command=self._toggle_auto_refresh
         )
@@ -356,61 +375,7 @@ class VFCurveTab:
         )
         btn_mem_reset.pack(side="right", fill="x", padx=0)
 
-        # === Export / Import ===
-        ei_frame = ctk.CTkFrame(scroll)
-        ei_frame.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(
-            ei_frame, text="📂 Export / Import VF Curve", font=("", 14, "bold")
-        ).pack(anchor="w", padx=10, pady=(10, 5))
-
-        grid = ctk.CTkFrame(ei_frame, fg_color="transparent")
-        grid.pack(fill="x", padx=10, pady=(0, 10))
-        grid.columnconfigure(1, weight=0)
-
-        ctk.CTkLabel(grid, text="File Path:").grid(
-            row=0, column=0, sticky="w", padx=5, pady=3
-        )
-        self.csv_path_var = ctk.StringVar(value="")
-        path_row = ctk.CTkFrame(grid, fg_color="transparent")
-        path_row.grid(row=0, column=1, sticky="ew", padx=5, pady=3)
-        path_entry = LiteEntry(
-            path_row,
-            textvariable=self.csv_path_var,
-            width=52,
-            min_px=420,
-            justify="left",
-        )
-        path_entry.pack(side="left")
-        LiteButton(path_row, text="...", width=34, command=self._browse_csv).pack(
-            side="left", padx=(5, 0)
-        )
-
-        self.use_default_path_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            path_row, text="Use for I/O", variable=self.use_default_path_var, width=80
-        ).pack(side="left", padx=(10, 0))
-
-        self.quick_export_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            grid, text="Quick export (skip load curve)", variable=self.quick_export_var
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=3)
-
-        btn_ei = ctk.CTkFrame(ei_frame, fg_color="transparent")
-        btn_ei.pack(fill="x", padx=10, pady=(0, 10))
-        LiteButton(
-            btn_ei, text="📤 Export VFP", width=130, command=self._export_vfp
-        ).pack(side="left", padx=5)
-        LiteButton(
-            btn_ei, text="📥 Import VFP", width=130, command=self._import_vfp
-        ).pack(side="left", padx=5)
-        LiteButton(
-            btn_ei,
-            text="🔁 Reset VFP",
-            width=140,
-            fg_color="#c0392b",
-            hover_color="#96281b",
-            command=self._reset_vfp,
-        ).pack(side="left", padx=5)
+        # Removed the old export/import panel; controls now live on the top row.
 
     # ────────────────────────────────────────────
     # Chart setup
@@ -1698,22 +1663,19 @@ class VFCurveTab:
     # ────────────────────────────────────────────
     def _browse_csv(self):
         path = filedialog.asksaveasfilename(
-            title="Select CSV File Path",
+            title="Select VF Curve I/O Path",
             defaultextension=".csv",
             filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
         )
         if path:
-            self.csv_path_var.set(path)
+            self._io_path_var.set(path)
+            self.app.console.append(f"[GUI] VF curve I/O path set to: {path}\n")
 
     def _export_vfp(self):
         gpu_args = self.app.get_gpu_args()
 
-        if self.use_default_path_var.get():
-            path = self.csv_path_var.get().strip()
-            if not path:
-                path = self._get_csv_path()
-                self.csv_path_var.set(path)
-        else:
+        path = self._io_path_var.get().strip()
+        if not path:
             path = filedialog.asksaveasfilename(
                 title="Export VF Curve",
                 defaultextension=".csv",
@@ -1721,6 +1683,7 @@ class VFCurveTab:
             )
             if not path:
                 return
+            self._io_path_var.set(path)
 
         args = gpu_args + ["set", "vfp", "export", path]
         if self.quick_export_var.get():
@@ -1730,12 +1693,8 @@ class VFCurveTab:
     def _import_vfp(self):
         gpu_args = self.app.get_gpu_args()
 
-        if self.use_default_path_var.get():
-            path = self.csv_path_var.get().strip()
-            if not path:
-                self.app.console.append("[GUI] No CSV path specified.\n")
-                return
-        else:
+        path = self._io_path_var.get().strip()
+        if not path:
             path = filedialog.askopenfilename(
                 title="Import VF Curve",
                 defaultextension=".csv",
@@ -1743,6 +1702,7 @@ class VFCurveTab:
             )
             if not path:
                 return
+            self._io_path_var.set(path)
 
         args = gpu_args + ["set", "vfp", "import", path]
         self.app.run_cli(
