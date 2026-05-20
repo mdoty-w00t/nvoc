@@ -91,36 +91,40 @@ class VFCurveTab:
             text_color="#aaccff",
         ).pack(side="left", padx=8)
         auto_row = ctk.CTkFrame(chart_top, fg_color="transparent")
-        auto_row.pack(side="right")
-        LiteButton(auto_row, text="📤 Export", width=90, command=self._export_vfp).pack(
-            side="left", padx=(0, 5)
+        auto_row.pack(side="right", padx=(0, 2))
+        self._auto_toggle_btn = ctk.CTkButton(
+            auto_row, text="▶ Auto", width=74, command=self._toggle_auto_refresh
         )
-        LiteButton(auto_row, text="📥 Import", width=90, command=self._import_vfp).pack(
-            side="left", padx=(0, 5)
+        self._auto_toggle_btn.pack(side="left", padx=(0, 4))
+        auto_interval_entry = LiteEntry(
+            auto_row,
+            textvariable=self._auto_interval_var,
+            width=4,
+            min_px=44,
+            justify="right",
+        )
+        ctk.CTkLabel(auto_row, text="Refresh:").pack(side="left", padx=(0, 4))
+        auto_interval_entry.pack(side="left", padx=(0, 4))
+        auto_interval_entry.bind("<Return>", self._on_auto_interval_changed)
+        auto_interval_entry.bind("<FocusOut>", self._on_auto_interval_changed)
+        ctk.CTkLabel(auto_row, text="s").pack(side="left", padx=(0, 6))
+        ctk.CTkCheckBox(auto_row, text="Quick", variable=self.quick_export_var).pack(
+            side="right", padx=(2, 3)
+        )
+        LiteButton(auto_row, text="📤 Export", width=84, command=self._export_vfp).pack(
+            side="left", padx=(0, 3)
+        )
+        LiteButton(auto_row, text="📥 Import", width=84, command=self._import_vfp).pack(
+            side="left", padx=(0, 3)
         )
         LiteButton(
             auto_row,
             text="⭮ RESET",
-            width=80,
+            width=74,
             fg_color="#c0392b",
             hover_color="#96281b",
             command=self._reset_vfp,
-        ).pack(side="left", padx=(0, 5))
-        self._auto_toggle_btn = ctk.CTkButton(
-            auto_row, text="▶ Auto", width=82, command=self._toggle_auto_refresh
-        )
-        self._auto_toggle_btn.pack(side="left", padx=(0, 6))
-        auto_interval_entry = LiteEntry(
-            auto_row,
-            textvariable=self._auto_interval_var,
-            width=5,
-            min_px=52,
-            justify="right",
-        )
-        auto_interval_entry.pack(side="left", padx=(0, 6))
-        auto_interval_entry.bind("<Return>", self._on_auto_interval_changed)
-        auto_interval_entry.bind("<FocusOut>", self._on_auto_interval_changed)
-        ctk.CTkLabel(auto_row, text="Refresh (s):").pack(side="left")
+        ).pack(side="left", padx=(0, 2))
 
         self._chart_frame = ctk.CTkFrame(chart_area)
         self._chart_frame.pack(fill="x", expand=False)
@@ -807,7 +811,7 @@ class VFCurveTab:
                     f"  idx : {s}\n"
                     f"  V   : {v[s]:.1f} mV\n"
                     f"  F   : {cur_f:.1f} MHz\n"
-                    f"  dF  : {ref_f:.1f} MHz (default)\n"
+                    f"  F0  : {ref_f:.1f} MHz \n"
                     f"  ΔF  : {sign}{delta:.1f} MHz  "
                 )
             else:
