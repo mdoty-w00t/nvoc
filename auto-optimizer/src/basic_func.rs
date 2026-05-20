@@ -2,7 +2,7 @@ use super::cli_types::{OutputFormat, ResetSettings};
 use super::human;
 use nvapi_hi::{
     Celsius, ClockDomain, CoolerPolicy, Gpu, GpuSettings, Kilohertz, KilohertzDelta, Microvolts,
-    MicrovoltsDelta, PState, Percentage, allowable_result,
+    MicrovoltsDelta, PState, Percentage,
 };
 use std::io;
 
@@ -32,6 +32,44 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use nvoc_core::fetch_gpu_type;
+
+trait ResetError: std::fmt::Display {
+    fn is_allowable_reset_error(&self) -> bool;
+}
+
+fn is_allowable_nvapi_error(err: &nvapi_hi::Error) -> bool {
+    matches!(
+        err,
+        nvapi_hi::Error::Nvapi(nvapi_hi::NvapiError {
+            status: nvapi_hi::Status::NotSupported | nvapi_hi::Status::NoImplementation,
+            ..
+        }) | nvapi_hi::Error::ArgumentRange(..)
+    )
+}
+
+impl ResetError for nvapi_hi::Error {
+    fn is_allowable_reset_error(&self) -> bool {
+        is_allowable_nvapi_error(self)
+    }
+}
+
+impl ResetError for nvapi_hi::NvapiError {
+    fn is_allowable_reset_error(&self) -> bool {
+        matches!(
+            self.status,
+            nvapi_hi::Status::NotSupported | nvapi_hi::Status::NoImplementation
+        )
+    }
+}
+
+impl ResetError for Error {
+    fn is_allowable_reset_error(&self) -> bool {
+        match self {
+            Error::Nvapi(err) => is_allowable_nvapi_error(err),
+            _ => false,
+        }
+    }
+}
 
 fn collect_long_flags(cmd: &clap::Command, out: &mut Vec<String>) {
     for arg in cmd.get_arguments() {
@@ -1048,15 +1086,16 @@ pub fn handle_reset(gpus: &[&Gpu], matches: &ArgMatches) -> Result<(), Error> {
         .transpose()?
         .unwrap_or(VfpResetDomain::All);
 
-    fn warn_result<E: Into<nvapi_hi::Error>>(
+    fn warn_result<E: ResetError>(
         r: Result<(), E>,
         setting: ResetSettings,
         explicit: bool,
     ) -> Result<(), Error> {
         let reset_error = |err| Error::Custom(format!("Reset {:?} failed: {}", setting, err));
-        match (allowable_result(r).map_err(reset_error)?, explicit) {
-            (Err(e), true) => Err(reset_error(e)),
-            _ => Ok(()),
+        match r {
+            Ok(()) => Ok(()),
+            Err(err) if err.is_allowable_reset_error() && !explicit => Ok(()),
+            Err(err) => Err(reset_error(err)),
         }
     }
 
