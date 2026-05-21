@@ -10,6 +10,7 @@ use super::target::GpuTarget;
 use super::types::{NvapiLockedVoltageTarget, VfpResetDomain};
 use nvapi_hi::{
     ClockDomain, CoolerPolicy, Kilohertz, KilohertzDelta, MicrovoltsDelta, PState, Percentage,
+    SensorThrottle, VfPoint,
 };
 use nvml_wrapper::enum_wrappers::device::PerformanceState;
 use nvml_wrapper::enums::device::FanControlPolicy;
@@ -54,6 +55,51 @@ pub fn run_many<O: GpuOperation + Clone>(
         operation,
         outcomes,
     })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueryGpuInfo;
+
+impl GpuOperation for QueryGpuInfo {
+    type Output = nvapi_hi::GpuInfo;
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::QueryGpuInfo
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.nvapi()?.info().map_err(Error::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueryGpuSettings;
+
+impl GpuOperation for QueryGpuSettings {
+    type Output = nvapi_hi::GpuSettings;
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::QueryGpuSettings
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.nvapi()?.settings().map_err(Error::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueryGpuStatus;
+
+impl GpuOperation for QueryGpuStatus {
+    type Output = nvapi_hi::GpuStatus;
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::QueryGpuStatus
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.nvapi()?.status().map_err(Error::from)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -650,6 +696,21 @@ impl GpuOperation for ResetVfpDeltas {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct ResetVfpLock;
+
+impl GpuOperation for ResetVfpLock {
+    type Output = ();
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::ResetVfpLock
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.nvapi()?.reset_vfp_lock().map_err(Error::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct SetVfpPointDelta {
     pub point: usize,
     pub delta: KilohertzDelta,
@@ -691,6 +752,246 @@ impl GpuOperation for SetVfpRangeDelta {
             requested: self.delta,
             applied: self.delta,
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SetDomainVfpDeltas {
+    pub domain: ClockDomain,
+    pub deltas: Vec<(usize, KilohertzDelta)>,
+}
+
+impl GpuOperation for SetDomainVfpDeltas {
+    type Output = ();
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::SetDomainVfpDeltas
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        low_nvapi::set_nvapi_domain_vfp_deltas(target.nvapi()?, self.domain, &self.deltas)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueryDomainVfpPoints {
+    pub domain: ClockDomain,
+    pub infer_missing_default: bool,
+    pub indexed: bool,
+}
+
+impl GpuOperation for QueryDomainVfpPoints {
+    type Output = Vec<(usize, VfPoint)>;
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::QueryDomainVfpPoints
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        let mut points = low_nvapi::query_domain_vf_points_indexed(
+            target.nvapi()?,
+            self.domain,
+            self.infer_missing_default,
+        )?;
+        if !self.indexed {
+            points = points
+                .into_iter()
+                .enumerate()
+                .map(|(i, (_, point))| (i, point))
+                .collect();
+        }
+        Ok(points)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueryDomainVfpIndices {
+    pub domain: ClockDomain,
+}
+
+impl GpuOperation for QueryDomainVfpIndices {
+    type Output = Vec<usize>;
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::QueryDomainVfpIndices
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        low_nvapi::query_domain_vfp_indices(target.nvapi()?, self.domain)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueryLegacyCoreOvervoltRanges;
+
+impl GpuOperation for QueryLegacyCoreOvervoltRanges {
+    type Output = Vec<(PState, MicrovoltsDelta, MicrovoltsDelta, MicrovoltsDelta)>;
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::QueryLegacyCoreOvervoltRanges
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        low_nvapi::legacy_core_overvolt_ranges(target.nvapi()?)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueryLegacyP0CoreMaxVoltageDelta;
+
+impl GpuOperation for QueryLegacyP0CoreMaxVoltageDelta {
+    type Output = Option<MicrovoltsDelta>;
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::QueryLegacyP0CoreMaxVoltageDelta
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        low_nvapi::legacy_p0_core_max_voltage_delta(target.nvapi()?)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SetVoltageBoost {
+    pub boost: Percentage,
+}
+
+impl GpuOperation for SetVoltageBoost {
+    type Output = AppliedValue<Percentage>;
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::SetVoltageBoost
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.nvapi()?.set_voltage_boost(self.boost)?;
+        Ok(AppliedValue {
+            requested: self.boost,
+            applied: self.boost,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SetNvapiPowerLimits {
+    pub limits: Vec<Percentage>,
+}
+
+impl GpuOperation for SetNvapiPowerLimits {
+    type Output = ();
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::SetNvapiPowerLimits
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target
+            .nvapi()?
+            .set_power_limits(self.limits.iter().copied())
+            .map_err(Error::from)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SetNvapiSensorLimits {
+    pub limits: Vec<SensorThrottle>,
+}
+
+impl GpuOperation for SetNvapiSensorLimits {
+    type Output = ();
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::SetNvapiSensorLimits
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target
+            .nvapi()?
+            .set_sensor_limits(self.limits.iter().cloned())
+            .map_err(Error::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ResetNvapiPowerLimits;
+
+impl GpuOperation for ResetNvapiPowerLimits {
+    type Output = ();
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::ResetNvapiPowerLimits
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        let info = target.nvapi()?.info()?;
+        target
+            .nvapi()?
+            .set_power_limits(info.power_limits.iter().map(|info| info.default))
+            .map_err(Error::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ResetNvapiSensorLimits;
+
+impl GpuOperation for ResetNvapiSensorLimits {
+    type Output = ();
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::ResetNvapiSensorLimits
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        let info = target.nvapi()?.info()?;
+        target
+            .nvapi()?
+            .set_sensor_limits(
+                info.sensor_limits
+                    .iter()
+                    .cloned()
+                    .map(nvapi_hi::SensorThrottle::from_default),
+            )
+            .map_err(Error::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ResetCoolerLevels;
+
+impl GpuOperation for ResetCoolerLevels {
+    type Output = ();
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::ResetCoolerLevels
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.nvapi()?.reset_cooler_levels().map_err(Error::from)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResetPstateClockOffsets {
+    pub offsets: Vec<(PState, ClockDomain)>,
+}
+
+impl GpuOperation for ResetPstateClockOffsets {
+    type Output = ();
+
+    fn kind(&self) -> OperationKind {
+        OperationKind::ResetPstateClockOffsets
+    }
+
+    fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target
+            .nvapi()?
+            .inner()
+            .set_pstates(
+                self.offsets
+                    .iter()
+                    .map(|&(pstate, clock)| (pstate, clock, KilohertzDelta(0))),
+            )
+            .map_err(Error::from)
     }
 }
 
@@ -876,4 +1177,143 @@ pub fn oc_params(gpu_type: super::gpu_type::GpuType) -> super::gpu_type::GpuOcPa
 
 pub fn percentage(value: u32) -> Percentage {
     Percentage(value)
+}
+
+pub fn set_nvapi_vfp_curve_delta(
+    target: &GpuTarget<'_>,
+    point: usize,
+    vfp_set_range: usize,
+    flat_curve: bool,
+    main_delta: i32,
+    lower_delta: Option<i32>,
+) -> Result<(), Error> {
+    if !flat_curve {
+        let start = point.checked_sub(vfp_set_range).ok_or_else(|| {
+            Error::Custom(format!(
+                "invalid VFP range: point ({point}) is smaller than range ({vfp_set_range})"
+            ))
+        })?;
+        run(
+            target,
+            SetVfpRangeDelta {
+                start,
+                end: point + vfp_set_range,
+                delta: KilohertzDelta(main_delta),
+            },
+        )?;
+    } else {
+        run(
+            target,
+            SetVfpRangeDelta {
+                start: point,
+                end: point + vfp_set_range,
+                delta: KilohertzDelta(main_delta),
+            },
+        )?;
+        if let Some(ld) = lower_delta {
+            let start = point.checked_sub(vfp_set_range).ok_or_else(|| {
+                Error::Custom(format!(
+                    "invalid VFP range: point ({point}) is smaller than range ({vfp_set_range})"
+                ))
+            })?;
+            let end = point.checked_sub(1).ok_or_else(|| {
+                Error::Custom("invalid VFP range: point must be greater than 0".to_string())
+            })?;
+            run(
+                target,
+                SetVfpRangeDelta {
+                    start,
+                    end,
+                    delta: KilohertzDelta(ld),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub fn set_nvapi_domain_vfp_deltas(
+    target: &GpuTarget<'_>,
+    domain: ClockDomain,
+    deltas: &[(usize, KilohertzDelta)],
+) -> Result<(), Error> {
+    run(
+        target,
+        SetDomainVfpDeltas {
+            domain,
+            deltas: deltas.to_vec(),
+        },
+    )
+    .map(|report| report.output)
+}
+
+pub fn query_domain_vf_points_indexed(
+    target: &GpuTarget<'_>,
+    domain: ClockDomain,
+    infer_missing_default: bool,
+) -> Result<Vec<(usize, VfPoint)>, Error> {
+    run(
+        target,
+        QueryDomainVfpPoints {
+            domain,
+            infer_missing_default,
+            indexed: true,
+        },
+    )
+    .map(|report| report.output)
+}
+
+pub fn query_domain_vfp_indices(
+    target: &GpuTarget<'_>,
+    domain: ClockDomain,
+) -> Result<Vec<usize>, Error> {
+    run(target, QueryDomainVfpIndices { domain }).map(|report| report.output)
+}
+
+pub fn legacy_core_overvolt_ranges(
+    target: &GpuTarget<'_>,
+) -> Result<Vec<(PState, MicrovoltsDelta, MicrovoltsDelta, MicrovoltsDelta)>, Error> {
+    run(target, QueryLegacyCoreOvervoltRanges).map(|report| report.output)
+}
+
+pub fn legacy_p0_core_max_voltage_delta(
+    target: &GpuTarget<'_>,
+) -> Result<Option<MicrovoltsDelta>, Error> {
+    run(target, QueryLegacyP0CoreMaxVoltageDelta).map(|report| report.output)
+}
+
+pub fn set_nvapi_pstate_clock_offsets<I>(target: &GpuTarget<'_>, offsets: I) -> Result<(), Error>
+where
+    I: IntoIterator<Item = (PState, ClockDomain, KilohertzDelta)>,
+{
+    target
+        .nvapi()?
+        .inner()
+        .set_pstates(offsets)
+        .map_err(Error::from)
+}
+
+pub fn set_nvapi_cooler_settings<I>(target: &GpuTarget<'_>, settings: I) -> Result<(), Error>
+where
+    I: IntoIterator<Item = (nvapi_hi::FanCoolerId, nvapi_hi::CoolerSettings)>,
+{
+    target
+        .nvapi()?
+        .set_cooler_levels(settings)
+        .map_err(Error::from)
+}
+
+pub fn set_nvapi_legacy_clocks(
+    target: &GpuTarget<'_>,
+    core_mhz: u32,
+    memory_mhz: u32,
+) -> Result<(), Error> {
+    run(
+        target,
+        SetLegacyClocks {
+            core_mhz,
+            memory_mhz,
+        },
+    )
+    .map(|report| report.output)
 }

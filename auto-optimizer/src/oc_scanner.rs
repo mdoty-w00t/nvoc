@@ -10,27 +10,39 @@ use super::oc_profile_function::{
 };
 use clap::ArgMatches;
 use num_traits::pow;
-use nvapi_hi::Gpu;
-use nvapi_hi::{ClockDomain, KilohertzDelta, PState};
-use nvml_wrapper::Nvml;
-use nvoc_core::legacy::{core_reset_vfp, get_voltage_by_point, set_vfp_curve};
-use nvoc_core::{Error, GpuOcParams, fetch_gpu_type};
+use nvoc_core::{
+    ClockDomain, Error, GpuOcParams, GpuOperation, GpuTarget, KilohertzDelta,
+    NvapiLockedVoltageTarget, PState, QueryGpuInfo, QueryGpuStatus, QueryVfpPointVoltage,
+    ResetCoolerLevels, ResetVfpDeltas, SetVfpPointDelta, SetVfpVoltageLock, VfPoint,
+    VfpResetDomain, fetch_gpu_type, run, set_nvapi_pstate_clock_offsets, set_nvapi_vfp_curve_delta,
+};
 use std::cmp::min;
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use std::{fs, iter};
+
+fn run_output<O: GpuOperation>(gpu: &GpuTarget<'_>, op: O) -> Result<O::Output, Error> {
+    run(gpu, op).map(|report| report.output)
+}
 
 mod pressure_runner {
     use super::*;
 
-    fn set_vfp_range_warn(gpu: &&Gpu, range: std::ops::RangeInclusive<usize>, delta_khz: i32) {
+    fn set_vfp_range_warn(
+        gpu: &GpuTarget<'_>,
+        range: std::ops::RangeInclusive<usize>,
+        delta_khz: i32,
+    ) {
         for offset in range {
-            match gpu.set_vfp(
-                iter::once((offset, KilohertzDelta(delta_khz))),
-                iter::empty(),
+            match run_output(
+                gpu,
+                SetVfpPointDelta {
+                    point: offset,
+                    delta: KilohertzDelta(delta_khz),
+                },
             ) {
                 Ok(_) => {}
                 Err(e) => eprintln!(
@@ -42,7 +54,7 @@ mod pressure_runner {
     }
 
     fn set_vfp_curve_warn(
-        gpu: &&Gpu,
+        gpu: &GpuTarget<'_>,
         point: usize,
         vfp_set_range: usize,
         flat_curve_flag: bool,
@@ -82,21 +94,19 @@ mod pressure_runner {
         pub(super) stressor_extra_args: &'a [String],
     }
 
-    fn test_initialization(gpu: &&Gpu, cfg: &TestPressureConfig<'_>) {
+    fn test_initialization(gpu: &GpuTarget<'_>, cfg: &TestPressureConfig<'_>) {
         if cfg.is_legacy_global_offset {
-            gpu.inner()
-                .set_pstates(
-                    [(
-                        PState::P0,
-                        ClockDomain::Graphics,
-                        KilohertzDelta(cfg.init_core_oc_value),
-                    )]
-                    .iter()
-                    .cloned(),
-                )
-                .unwrap_or_else(|e| {
-                    eprintln!("Warning:{}, initializing Error. GPU crashed...", e);
-                });
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(
+                    PState::P0,
+                    ClockDomain::Graphics,
+                    KilohertzDelta(cfg.init_core_oc_value),
+                )],
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Warning:{}, initializing Error. GPU crashed...", e);
+            });
             return;
         }
 
@@ -113,7 +123,7 @@ mod pressure_runner {
     }
 
     fn apply_fluctuation(
-        gpu: &&Gpu,
+        gpu: &GpuTarget<'_>,
         cfg: &TestPressureConfig<'_>,
         fluctuation_h_l_flag: bool,
     ) -> bool {
@@ -136,19 +146,17 @@ mod pressure_runner {
         };
 
         if cfg.is_legacy_global_offset {
-            gpu.inner()
-                .set_pstates(
-                    [(
-                        PState::P0,
-                        ClockDomain::Graphics,
-                        KilohertzDelta(cfg.init_core_oc_value + fluctuation_freq),
-                    )]
-                    .iter()
-                    .cloned(),
-                )
-                .unwrap_or_else(|e| {
-                    eprintln!("Warning:{}, fluctuation Error. GPU crashed...", e);
-                });
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(
+                    PState::P0,
+                    ClockDomain::Graphics,
+                    KilohertzDelta(cfg.init_core_oc_value + fluctuation_freq),
+                )],
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Warning:{}, fluctuation Error. GPU crashed...", e);
+            });
         } else {
             let main_delta = cfg.init_core_oc_value + fluctuation_freq;
             let lower_delta =
@@ -193,7 +201,11 @@ mod pressure_runner {
         }
     }
 
-    pub(super) fn run(gpu: &&Gpu, matches: &ArgMatches, cfg: &TestPressureConfig<'_>) -> i32 {
+    pub(super) fn run(
+        gpu: &GpuTarget<'_>,
+        _matches: &ArgMatches,
+        cfg: &TestPressureConfig<'_>,
+    ) -> i32 {
         let app_path = String::from(cfg.test_exe);
         // Build argv as a structured Vec so paths or codes containing whitespace
         // are not silently re-tokenized into multiple arguments.
@@ -225,7 +237,13 @@ mod pressure_runner {
                     let mut in_test_check_number = 0;
                     let mut fluctuation_h_l_flag = false;
                     let mut thrm_or_pwr_limit_number = 0;
-                    core_reset_vfp(gpu).unwrap_or_else(|err| {
+                    run_output(
+                        gpu,
+                        ResetVfpDeltas {
+                            domain: VfpResetDomain::All,
+                        },
+                    )
+                    .unwrap_or_else(|err| {
                         eprintln!("Warning: Failed to reset GPU due to {:?}", err);
                     });
                     sleep(Duration::from_secs(1));
@@ -244,12 +262,18 @@ mod pressure_runner {
 
                             if !cfg.is_legacy_global_offset {
                                 match voltage_frequency_check(
-                                    matches,
+                                    std::slice::from_ref(gpu),
                                     cfg.point,
                                     print_scan_separator,
                                 ) {
-                                    Ok(true) => {}
-                                    Ok(false) => {
+                                    Ok(checks) if checks.iter().all(|check| check.precise) => {}
+                                    Ok(checks) => {
+                                        for check in checks {
+                                            println!(
+                                                "GPU {} V/F check at point {} precise={}",
+                                                check.gpu_id, cfg.point, check.precise
+                                            );
+                                        }
                                         println!("Considering trig'd thrm/pwr capping!!!");
                                         thrm_or_pwr_limit_number += 1;
                                     }
@@ -260,15 +284,26 @@ mod pressure_runner {
                                     }
                                 }
 
-                                match get_voltage_by_point(gpu, cfg.point) {
+                                match run_output(gpu, QueryVfpPointVoltage { point: cfg.point }) {
                                     Ok(v) => {
                                         println!("Voltage at point {}: {}", cfg.point, v);
-                                        gpu.set_vfp_lock_voltage(Some(v)).unwrap_or_else(|err| {
-                                            eprintln!(
-                                                "Warning: Failed to set voltage due to {:?}",
-                                                err
-                                            );
-                                        });
+                                        run_output(
+                                            gpu,
+                                            SetVfpVoltageLock {
+                                                voltage_target: NvapiLockedVoltageTarget::Voltage(
+                                                    v,
+                                                ),
+                                                feedback: false,
+                                            },
+                                        )
+                                        .unwrap_or_else(
+                                            |err| {
+                                                eprintln!(
+                                                    "Warning: Failed to set voltage due to {:?}",
+                                                    err
+                                                );
+                                            },
+                                        );
                                     }
                                     Err(e) => {
                                         eprintln!(
@@ -307,7 +342,13 @@ mod pressure_runner {
                                 test_start_at.elapsed().as_secs()
                             );
                             force_kill_process(&mut process, "in-test timeout");
-                            core_reset_vfp(gpu).unwrap_or_else(|err| {
+                            run_output(
+                                gpu,
+                                ResetVfpDeltas {
+                                    domain: VfpResetDomain::All,
+                                },
+                            )
+                            .unwrap_or_else(|err| {
                                 eprintln!("Warning: Failed to reset GPU due to {:?}", err);
                             });
                             break;
@@ -349,7 +390,7 @@ mod pressure_runner {
 
 #[allow(clippy::too_many_arguments)]
 fn test_pressure(
-    gpu: &&Gpu,
+    gpu: &GpuTarget<'_>,
     matches: &ArgMatches,
     point: usize,
     flat_curve_flag: bool,
@@ -492,11 +533,22 @@ fn apply_short_phase_success_step(
     Some(increase)
 }
 
-fn pre_load_vf_recheck(matches: &ArgMatches, point: usize) -> Result<(), Error> {
+fn pre_load_vf_recheck(gpu: &GpuTarget<'_>, point: usize) -> Result<(), Error> {
     println!("Waiting for pre-load volt-freq recheck");
     sleep(Duration::from_secs(1));
-    voltage_frequency_check(matches, point, print_scan_separator)?;
-    Ok(())
+    let checks = voltage_frequency_check(std::slice::from_ref(gpu), point, print_scan_separator)?;
+    if checks.iter().all(|check| check.precise) {
+        return Ok(());
+    }
+
+    let summary = checks
+        .iter()
+        .map(|check| format!("GPU {} precise={}", check.gpu_id, check.precise))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(Error::Custom(format!(
+        "V/F check failed at point {point}: {summary}"
+    )))
 }
 
 fn apply_long_phase_failure_step(
@@ -532,7 +584,7 @@ fn log_point_test_header<V: std::fmt::Display, D: std::fmt::Display>(
 
 fn run_legacy_short_phase(
     l: &mut fs::File,
-    gpu: &&Gpu,
+    gpu: &GpuTarget<'_>,
     args: &LegacyPhaseArgs<'_>,
     init_core_oc_value: &mut i32,
     core_oc_safe_limit: &mut i32,
@@ -562,14 +614,13 @@ fn run_legacy_short_phase(
     }
 
     loop {
-        gpu.inner().set_pstates(
+        set_nvapi_pstate_clock_offsets(
+            gpu,
             [(
                 PState::P0,
                 ClockDomain::Graphics,
                 KilohertzDelta(*init_core_oc_value),
-            )]
-            .iter()
-            .cloned(),
+            )],
         )?;
 
         test_num += 1;
@@ -617,10 +668,9 @@ fn run_legacy_short_phase(
                 "Short Test #{} FAILED at +{}kHz",
                 *test_code, *init_core_oc_value
             );
-            gpu.inner().set_pstates(
-                [(PState::P0, ClockDomain::Graphics, KilohertzDelta(0))]
-                    .iter()
-                    .cloned(),
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(PState::P0, ClockDomain::Graphics, KilohertzDelta(0))],
             )?;
             let decrease = apply_short_phase_failure_step(
                 init_core_oc_value,
@@ -665,7 +715,7 @@ fn run_legacy_short_phase(
 
 fn run_legacy_long_phase(
     l: &mut fs::File,
-    gpu: &&Gpu,
+    gpu: &GpuTarget<'_>,
     args: &LegacyPhaseArgs<'_>,
     init_core_oc_value: &mut i32,
     test_code: &mut usize,
@@ -674,14 +724,13 @@ fn run_legacy_long_phase(
     writeln!(l, "Initiating Long Test...")?;
 
     loop {
-        gpu.inner().set_pstates(
+        set_nvapi_pstate_clock_offsets(
+            gpu,
             [(
                 PState::P0,
                 ClockDomain::Graphics,
                 KilohertzDelta(*init_core_oc_value),
-            )]
-            .iter()
-            .cloned(),
+            )],
         )?;
 
         *test_code += 1;
@@ -720,10 +769,9 @@ fn run_legacy_long_phase(
                 "Long Test #{} FAILED at +{}kHz",
                 *test_code, *init_core_oc_value
             );
-            gpu.inner().set_pstates(
-                [(PState::P0, ClockDomain::Graphics, KilohertzDelta(0))]
-                    .iter()
-                    .cloned(),
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(PState::P0, ClockDomain::Graphics, KilohertzDelta(0))],
             )?;
             apply_long_phase_failure_step(
                 init_core_oc_value,
@@ -809,7 +857,7 @@ fn apply_arch_safety_policy(
 #[allow(clippy::too_many_arguments)]
 fn run_gpuboostv3_short_phase<V: std::fmt::Display + Copy>(
     l: &mut fs::File,
-    gpu: &Gpu,
+    gpu: &GpuTarget<'_>,
     args: &GpuBoostPhaseArgs<'_>,
     point: usize,
     v: V,
@@ -822,8 +870,8 @@ fn run_gpuboostv3_short_phase<V: std::fmt::Display + Copy>(
     let mut test_code = 0;
 
     loop {
-        set_vfp_curve(
-            &gpu,
+        set_nvapi_vfp_curve_delta(
+            gpu,
             point,
             args.vfp_set_range,
             flat_curve_flag,
@@ -831,7 +879,7 @@ fn run_gpuboostv3_short_phase<V: std::fmt::Display + Copy>(
             Some(*init_core_oc_value - args.common.minimum_delta_core_freq_step),
         )?;
 
-        pre_load_vf_recheck(args.common.matches, point)?;
+        pre_load_vf_recheck(gpu, point)?;
 
         test_num += 1;
         test_code += 1;
@@ -873,7 +921,7 @@ fn run_gpuboostv3_short_phase<V: std::fmt::Display + Copy>(
         )?;
 
         let test_flag = test_pressure(
-            &gpu,
+            gpu,
             args.common.matches,
             point,
             flat_curve_flag,
@@ -894,7 +942,12 @@ fn run_gpuboostv3_short_phase<V: std::fmt::Display + Copy>(
         writeln!(l, "Test result is code #{} .", test_flag)?;
 
         if test_flag != 0 {
-            core_reset_vfp(gpu)?;
+            run_output(
+                gpu,
+                ResetVfpDeltas {
+                    domain: VfpResetDomain::All,
+                },
+            )?;
             println!(
                 "Test #{} FAILED on point: #{}, voltage: #{}, freq_delta: #+{}. ",
                 test_code,
@@ -954,7 +1007,7 @@ fn run_gpuboostv3_short_phase<V: std::fmt::Display + Copy>(
 #[allow(clippy::too_many_arguments)]
 fn run_gpuboostv3_long_phase<V: std::fmt::Display + Copy>(
     l: &mut fs::File,
-    gpu: &Gpu,
+    gpu: &GpuTarget<'_>,
     args: &GpuBoostPhaseArgs<'_>,
     point: usize,
     v: V,
@@ -967,7 +1020,7 @@ fn run_gpuboostv3_long_phase<V: std::fmt::Display + Copy>(
     writeln!(l, "Initiating Long Test...")?;
 
     loop {
-        pre_load_vf_recheck(args.common.matches, point)?;
+        pre_load_vf_recheck(gpu, point)?;
 
         *test_code += 1;
         log_point_test_header(
@@ -980,7 +1033,7 @@ fn run_gpuboostv3_long_phase<V: std::fmt::Display + Copy>(
         )?;
 
         long_duration_flag = test_pressure(
-            &gpu,
+            gpu,
             args.common.matches,
             point,
             flat_curve_flag,
@@ -998,7 +1051,12 @@ fn run_gpuboostv3_long_phase<V: std::fmt::Display + Copy>(
             args.common.stressor_extra_args,
         );
         if long_duration_flag != 0 {
-            core_reset_vfp(gpu)?;
+            run_output(
+                gpu,
+                ResetVfpDeltas {
+                    domain: VfpResetDomain::All,
+                },
+            )?;
             println!(
                 "Long Test #{} FAILED on point: #{}, voltage: #{}, freq_delta: #+{}. ",
                 *test_code,
@@ -1049,8 +1107,8 @@ struct MemOcPhaseArgs<'a> {
 
 fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
     l: &mut fs::File,
-    gpu: &Gpu,
-    gpus: &Vec<&Gpu>,
+    gpu: &GpuTarget<'_>,
+    gpus: &Vec<GpuTarget<'_>>,
     args: &MemOcPhaseArgs<'_>,
     mem_voltage: V,
     init_vmem_oc_value: &mut i32,
@@ -1065,20 +1123,19 @@ fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
             Err(e) => eprintln!("Error: Failed to lock voltage - {:?}", e),
         }
 
-        gpu.inner().set_pstates(
+        set_nvapi_pstate_clock_offsets(
+            gpu,
             [(
                 PState::P0,
                 ClockDomain::Memory,
                 KilohertzDelta(*init_vmem_oc_value),
-            )]
-            .iter()
-            .cloned(),
+            )],
         )?;
 
         mem_test_num += 1;
         mem_test_code += 1;
 
-        pre_load_vf_recheck(args.common.matches, args.point)?;
+        pre_load_vf_recheck(gpu, args.point)?;
 
         println!(
             "current test progress estimated:{:.2}%",
@@ -1098,7 +1155,7 @@ fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
         )?;
 
         let mem_test_flag = test_pressure(
-            &gpu,
+            gpu,
             args.common.matches,
             args.point,
             false,
@@ -1119,10 +1176,9 @@ fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
         writeln!(l, "Test result is code #{} .", mem_test_flag)?;
 
         if mem_test_flag != 0 {
-            gpu.inner().set_pstates(
-                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))]
-                    .iter()
-                    .cloned(),
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
             )?;
             println!(
                 "Long Test #{} FAILED on point: #{}, voltage: #{}, mem_freq_delta: #+{}. ",
@@ -1172,12 +1228,9 @@ fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
     Ok(())
 }
 
-pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(), Error> {
+pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> Result<(), Error> {
     use super::autoscan_config::AutoscanConfig;
     let cfg = AutoscanConfig::from_autoscan_matches(matches)?;
-    let nvml = Nvml::init()
-        .map_err(|e| Error::Custom(format!("NVML init failed in autoscan: {:?}", e)))?;
-
     let mut is_ultrafast = cfg.is_ultrafast;
     if is_ultrafast {
         println!("Ultrafast mode interpolation active...");
@@ -1238,15 +1291,53 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
 
         None => {
             println!("Voltage scan initialized because values were missing in the log.");
-            let (lvp, uvp) = handle_test_voltage_limits(gpus, matches, print_scan_separator)?;
-
-            for gpu in gpus {
-                let minimum_voltage = get_voltage_by_point(gpu, lvp)?;
-                let maximum_voltage = get_voltage_by_point(gpu, uvp)?;
-                writeln!(l)?;
-                writeln!(l, "minimum_voltage_point: {} @ {}", lvp, minimum_voltage)?;
-                writeln!(l, "maximum_voltage_point: {} @ {}", uvp, maximum_voltage)?;
+            let voltage_limits = handle_test_voltage_limits(gpus, matches, print_scan_separator)?;
+            let lvp = voltage_limits
+                .iter()
+                .map(|limits| limits.lower_point)
+                .max()
+                .ok_or_else(|| Error::from("no GPU voltage limits were probed"))?;
+            let uvp = voltage_limits
+                .iter()
+                .map(|limits| limits.upper_point)
+                .min()
+                .ok_or_else(|| Error::from("no GPU voltage limits were probed"))?;
+            if lvp > uvp {
+                return Err(Error::Custom(format!(
+                    "selected GPUs have no common voltage point range: lower point {lvp}, upper point {uvp}"
+                )));
             }
+
+            for limits in &voltage_limits {
+                let gpu = gpus
+                    .iter()
+                    .find(|gpu| gpu.id.0 == limits.gpu_id)
+                    .ok_or_else(|| Error::from("probed GPU was not found in selected targets"))?;
+                let minimum_voltage = run_output(
+                    gpu,
+                    QueryVfpPointVoltage {
+                        point: limits.lower_point,
+                    },
+                )?;
+                let maximum_voltage = run_output(
+                    gpu,
+                    QueryVfpPointVoltage {
+                        point: limits.upper_point,
+                    },
+                )?;
+                writeln!(l)?;
+                writeln!(
+                    l,
+                    "GPU {} minimum_voltage_point: {} @ {}",
+                    limits.gpu_id, limits.lower_point, minimum_voltage
+                )?;
+                writeln!(
+                    l,
+                    "GPU {} maximum_voltage_point: {} @ {}",
+                    limits.gpu_id, limits.upper_point, maximum_voltage
+                )?;
+            }
+            writeln!(l, "common_voltage_point_range: {}-{}", lvp, uvp)?;
 
             (lvp, uvp)
         }
@@ -1255,25 +1346,27 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
     let mut init_vmem_oc_value = 0;
 
     for gpu in gpus {
-        gpu.inner().set_pstates(
-            [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))]
-                .iter()
-                .cloned(),
+        set_nvapi_pstate_clock_offsets(
+            gpu,
+            [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
         )?;
 
-        let info = gpu.info()?;
+        let info = run_output(gpu, QueryGpuInfo)?;
         let gpu_type = fetch_gpu_type(&info);
 
-        gpu.set_vfp(
-            iter::once((upper_voltage_point, KilohertzDelta(45000))),
-            iter::empty(),
+        run_output(
+            gpu,
+            SetVfpPointDelta {
+                point: upper_voltage_point,
+                delta: KilohertzDelta(45000),
+            },
         )?;
         match handle_lock_vfp(gpus, matches, upper_voltage_point, false) {
             Ok(_) => println!("Voltage locked successfully."),
             Err(e) => eprintln!("Error: Failed to lock voltage - {:?}", e),
         }
 
-        let readout_f = gpu.status()?.clone().clocks;
+        let readout_f = run_output(gpu, QueryGpuStatus)?.clone().clocks;
 
         let mut clocks = Vec::new();
         for (clock_name, freq) in readout_f {
@@ -1302,7 +1395,10 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
 
         let mut core_oc_safe_limit_ref = core_oc_safe_limit;
         let _init_core_oc_value_ref = init_core_oc_value;
-        let points = gpu.status()?.vfp.ok_or(Error::VfpUnsupported)?.graphics;
+        let points = run_output(gpu, QueryGpuStatus)?
+            .vfp
+            .ok_or(Error::VfpUnsupported)?
+            .graphics;
 
         let mut point = lower_voltage_point;
         let mut resuming_flag = false;
@@ -1406,8 +1502,19 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
 
         writeln!(l)?;
         println!("Waiting for default volt-freq self-check");
-        voltage_frequency_check(matches, point, print_scan_separator)
-            .expect("Failed to read v-f info");
+        let checks =
+            voltage_frequency_check(std::slice::from_ref(gpu), point, print_scan_separator)
+                .expect("Failed to read v-f info");
+        if !checks.iter().all(|check| check.precise) {
+            let summary = checks
+                .iter()
+                .map(|check| format!("GPU {} precise={}", check.gpu_id, check.precise))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::Custom(format!(
+                "default V/F self-check failed at point {point}: {summary}"
+            )));
+        }
         let mut v;
         let mut default_frequency;
         let mut prev_endpoint_delta: Option<i32> = None;
@@ -1490,14 +1597,13 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
                 }
             }
 
-            gpu.inner().set_pstates(
+            set_nvapi_pstate_clock_offsets(
+                gpu,
                 [(
                     PState::P0,
                     ClockDomain::Memory,
                     KilohertzDelta(init_vmem_oc_value),
-                )]
-                .iter()
-                .cloned(),
+                )],
             )?;
 
             apply_arch_safety_policy(
@@ -1546,7 +1652,7 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
                 KilohertzDelta(init_core_oc_value)
             );
 
-            let p_save = nvapi_hi::VfPoint {
+            let p_save = VfPoint {
                 voltage: v,
                 frequency: default_frequency + KilohertzDelta(init_core_oc_value),
                 delta: KilohertzDelta(init_core_oc_value),
@@ -1576,7 +1682,7 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
                         .get(&(point - step))
                         .ok_or(Error::Str("invalid point index"))?
                         .voltage;
-                    let p_save_prev = nvapi_hi::VfPoint {
+                    let p_save_prev = VfPoint {
                         voltage: v_prev,
                         frequency: default_frequency + KilohertzDelta(interpolated_delta),
                         delta: KilohertzDelta(interpolated_delta),
@@ -1605,10 +1711,9 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
         //memory oc
         let vmem_scan_switch = matches.get_flag("Vmem_scan_switch");
         if vmem_scan_switch {
-            gpu.inner().set_pstates(
-                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))]
-                    .iter()
-                    .cloned(),
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
             )?;
 
             let mut mem_oc_safe_limit = 0;
@@ -1668,8 +1773,8 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
                 KilohertzDelta(init_vmem_oc_value)
             );
         }
-        gpu.reset_cooler_levels().unwrap_or_else(|_e| {
-            handle_reset_nvml_cooler_single_gpu(&nvml, gpu, "all")
+        run_output(gpu, ResetCoolerLevels).unwrap_or_else(|_e| {
+            handle_reset_nvml_cooler_single_gpu(gpu, "all")
                 .unwrap_or_else(|e| eprintln!("Failed to reset cooler: {e}"))
         })
     }
@@ -1677,12 +1782,9 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(),
     Ok(())
 }
 
-pub fn autoscan_legacy(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(), Error> {
+pub fn autoscan_legacy(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> Result<(), Error> {
     use super::autoscan_config::AutoscanConfig;
     let cfg = AutoscanConfig::from_legacy_matches(matches)?;
-    let nvml = Nvml::init()
-        .map_err(|e| Error::Custom(format!("NVML init failed in autoscan_legacy: {:?}", e)))?;
-
     let test_exe = cfg.test_exe.as_str();
     let log_filename = cfg.log.as_str();
 
@@ -1702,7 +1804,7 @@ pub fn autoscan_legacy(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(), Err
 
     for gpu in gpus {
         // 从 GpuType 读取该世代的固定 OC 扫描参数
-        let info = gpu.info()?;
+        let info = run_output(gpu, QueryGpuInfo)?;
         let gpu_type = fetch_gpu_type(&info);
 
         let GpuOcParams {
@@ -1794,10 +1896,9 @@ pub fn autoscan_legacy(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(), Err
 
         for gpu in gpus {
             // Memory: keep at stock for legacy scan
-            gpu.inner().set_pstates(
-                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))]
-                    .iter()
-                    .cloned(),
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
             )?;
 
             run_legacy_short_phase(
@@ -1829,13 +1930,12 @@ pub fn autoscan_legacy(gpus: &Vec<&Gpu>, matches: &ArgMatches) -> Result<(), Err
             );
 
             // Restore GPU to stock offset after scan
-            gpu.inner().set_pstates(
-                [(PState::P0, ClockDomain::Graphics, KilohertzDelta(0))]
-                    .iter()
-                    .cloned(),
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(PState::P0, ClockDomain::Graphics, KilohertzDelta(0))],
             )?;
-            gpu.reset_cooler_levels().unwrap_or_else(|_e| {
-                handle_reset_nvml_cooler_single_gpu(&nvml, gpu, "all")
+            run_output(gpu, ResetCoolerLevels).unwrap_or_else(|_e| {
+                handle_reset_nvml_cooler_single_gpu(gpu, "all")
                     .unwrap_or_else(|e| eprintln!("Failed to reset cooler: {e}"))
             })
         }
