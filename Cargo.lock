@@ -1099,8 +1099,6 @@ dependencies = [
  "clap",
  "csv",
  "num-traits",
- "nvapi",
- "nvapi-hi",
  "nvml-wrapper",
  "nvoc-core",
  "serde_json",

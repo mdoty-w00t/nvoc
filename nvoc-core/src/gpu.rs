@@ -23,16 +23,6 @@ impl GpuSelector {
     }
 }
 
-pub fn single_gpu<'a>(gpus: &[&'a Gpu]) -> Result<&'a Gpu, Error> {
-    let mut gpus = gpus.iter();
-    gpus.next()
-        .ok_or_else(|| Error::from("no GPU selected"))
-        .and_then(|g| match gpus.next() {
-            None => Ok(*g),
-            Some(..) => Err(Error::from("multiple GPUs selected")),
-        })
-}
-
 fn parse_gpu_id(raw: &str) -> Result<usize, Error> {
     let raw = raw.trim();
 
@@ -59,61 +49,11 @@ fn parse_gpu_id(raw: &str) -> Result<usize, Error> {
     }
 }
 
-pub fn select_gpus<'a>(gpus: &'a [Gpu], selector: &GpuSelector) -> Result<Vec<&'a Gpu>, Error> {
-    let selected = match selector.specs() {
-        Some(specs) => {
-            let inputs = specs
-                .iter()
-                .map(|s| parse_gpu_id(s.as_str()))
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let mut selected = Vec::new();
-            for input in inputs {
-                if input < 256 {
-                    let gpu = gpus.get(input).ok_or_else(|| {
-                        Error::Custom(format!(
-                            "no GPU matches --gpu {}; use `nvoc list` to see available indices",
-                            input
-                        ))
-                    })?;
-                    selected.push(gpu);
-                    continue;
-                }
-
-                if let Some(gpu) = gpus.iter().find(|gpu| gpu.id() == input) {
-                    selected.push(gpu);
-                    continue;
-                }
-
-                let legacy = input << 8;
-                if let Some(gpu) = gpus.iter().find(|gpu| gpu.id() == legacy) {
-                    selected.push(gpu);
-                    continue;
-                }
-
-                return Err(Error::Custom(format!(
-                    "no GPU matches --gpu {}; use `nvoc list` to see available indices",
-                    input
-                )));
-            }
-            selected
-        }
-        None => gpus.iter().collect(),
-    };
-
-    if selected.is_empty() {
-        Err(Error::DeviceNotFound)
-    } else {
-        Ok(selected)
-    }
-}
-
 pub fn get_sorted_gpus() -> nvapi_hi::Result<Vec<Gpu>> {
     let mut gpus = Gpu::enumerate()?;
     gpus.sort_by_key(|g| g.id());
     Ok(gpus)
 }
-
 pub fn get_sorted_gpu_ids_nvml(nvml: &Nvml) -> Result<Vec<u32>, Error> {
     let count = nvml
         .device_count()

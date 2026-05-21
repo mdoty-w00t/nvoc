@@ -9,7 +9,8 @@ use nvapi_hi::{
     FanCoolerId, Gpu, Kilohertz, KilohertzDelta, Microvolts, MicrovoltsDelta, PState, Percentage,
     PerfLimitId, PffCurve, PffPoint, VfpPoint,
 };
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashSet};
 use std::iter;
 use std::str::FromStr;
 use std::thread::sleep;
@@ -132,6 +133,47 @@ pub fn set_pstate_base_voltage(
         delta_uv.0 as f64 / 1000.0
     );
     Ok(())
+}
+
+pub fn legacy_p0_core_max_voltage_delta(gpu: &Gpu) -> Result<Option<MicrovoltsDelta>, Error> {
+    let pstates = gpu
+        .inner()
+        .pstates()
+        .map_err(|e| Error::from(format!("Failed to read pstates: {:?}", e)))?;
+
+    Ok(pstates
+        .pstates
+        .into_iter()
+        .find(|p| p.id == PState::P0)
+        .and_then(|p0| {
+            p0.base_voltages
+                .into_iter()
+                .find(|v| v.voltage_domain == VoltageDomain::Core)
+                .map(|v| v.voltage_delta.range.max)
+        }))
+}
+
+pub fn legacy_core_overvolt_ranges(
+    gpu: &Gpu,
+) -> Result<Vec<(PState, MicrovoltsDelta, MicrovoltsDelta, MicrovoltsDelta)>, Error> {
+    let pstates = gpu.inner().pstates().map_err(Error::from)?;
+    Ok(pstates
+        .pstates
+        .iter()
+        .filter_map(|ps| {
+            ps.base_voltages
+                .iter()
+                .find(|v| v.voltage_domain == VoltageDomain::Core && v.editable)
+                .map(|v| {
+                    (
+                        ps.id,
+                        v.voltage_delta.value,
+                        v.voltage_delta.range.min,
+                        v.voltage_delta.range.max,
+                    )
+                })
+        })
+        .collect())
 }
 
 /// Preserve all editable clock deltas in the target P-State, overriding only one domain.
@@ -663,8 +705,8 @@ pub fn lock_vfp(gpus: &[&Gpu], request: VfpLockRequest, feedback_flag: bool) -> 
     Ok(())
 }
 
-pub fn reset_vfp_deltas(gpu: &Gpu, domain: VfpResetDomain) -> nvapi_hi::Result<()> {
-    let info = gpu.info()?;
+pub fn reset_vfp_deltas(gpu: &Gpu, domain: VfpResetDomain) -> Result<(), Error> {
+    let info = gpu.info().map_err(Error::from)?;
     let gpu_type = fetch_gpu_type(&info);
 
     // 9 系及更早（Maxwell 及之前）不支持 VFP 曲线，只能通过 set_pstates 单点清零
@@ -766,13 +808,16 @@ pub fn reset_vfp_deltas(gpu: &Gpu, domain: VfpResetDomain) -> nvapi_hi::Result<(
                 gpu.set_vfp(
                     iter::once((point, KilohertzDelta(0))),
                     iter::once((point, KilohertzDelta(0))),
-                )?;
+                )
+                .map_err(Error::from)?;
             }
             VfpResetDomain::Core => {
-                gpu.set_vfp(iter::once((point, KilohertzDelta(0))), iter::empty())?;
+                gpu.set_vfp(iter::once((point, KilohertzDelta(0))), iter::empty())
+                    .map_err(Error::from)?;
             }
             VfpResetDomain::Memory => {
-                gpu.set_vfp(iter::empty(), iter::once((point, KilohertzDelta(0))))?;
+                gpu.set_vfp(iter::empty(), iter::once((point, KilohertzDelta(0))))
+                    .map_err(Error::from)?;
             }
         }
     }
@@ -783,7 +828,7 @@ pub fn reset_vfp_deltas(gpu: &Gpu, domain: VfpResetDomain) -> nvapi_hi::Result<(
     Ok(())
 }
 
-pub fn core_reset_vfp(gpu: &Gpu) -> nvapi_hi::Result<()> {
+pub fn core_reset_vfp(gpu: &Gpu) -> Result<(), Error> {
     reset_vfp_deltas(gpu, VfpResetDomain::All)
 }
 
@@ -817,6 +862,124 @@ pub fn set_pointwise_vfp_delta(
 
     for gpu in gpus {
         set_vfp_range(gpu, start..=end, delta_khz)?;
+    }
+
+    Ok(())
+}
+
+pub fn query_domain_vf_points_indexed(
+    gpu: &Gpu,
+    domain: ClockDomain,
+    infer_missing_default: bool,
+) -> Result<Vec<(usize, nvapi_hi::VfPoint)>, Error> {
+    let info = gpu.inner().vfp_info()?;
+    let curve = gpu.inner().vfp_curve(&info)?;
+    let table = gpu.inner().vfp_table(&info)?;
+
+    let points = curve.points.get(&domain).cloned().unwrap_or_default();
+    let deltas = table.delta_points.get(&domain).cloned().unwrap_or_default();
+
+    let mut pts = points.into_iter().peekable();
+    let mut dts = deltas.into_iter().peekable();
+    let mut result = Vec::new();
+    loop {
+        let ord = match (pts.peek(), dts.peek()) {
+            (None, _) | (_, None) => break,
+            (Some((i0, _)), Some((i1, _))) => i0.cmp(i1),
+        };
+        match ord {
+            Ordering::Equal => {
+                let (i, point) = pts.next().unwrap();
+                let (_, delta) = dts.next().unwrap();
+                let mut point = nvapi_hi::VfPoint {
+                    voltage: point.configured().voltage,
+                    frequency: point.configured().frequency,
+                    default_frequency: point.default().map(|p| p.frequency).unwrap_or_default(),
+                    delta,
+                };
+                if infer_missing_default && point.default_frequency.0 == 0 {
+                    let base = point.frequency.0 as i64 - point.delta.0 as i64;
+                    point.default_frequency = Kilohertz(base.max(0) as u32);
+                }
+                result.push((i, point));
+            }
+            Ordering::Less => {
+                let (i, _) = pts.next().unwrap();
+                eprintln!("VFP point index {i} has no matching delta; skipping");
+            }
+            Ordering::Greater => {
+                let (i, _) = dts.next().unwrap();
+                eprintln!("VFP delta index {i} has no matching point; skipping");
+            }
+        }
+    }
+    for (i, _) in pts {
+        eprintln!("VFP point index {i} has no matching delta; skipping");
+    }
+    for (i, _) in dts {
+        eprintln!("VFP delta index {i} has no matching point; skipping");
+    }
+    Ok(result)
+}
+
+pub fn query_domain_vfp_indices(gpu: &Gpu, domain: ClockDomain) -> Result<Vec<usize>, Error> {
+    let info = gpu.inner().vfp_info()?;
+    Ok(info.iter(domain).collect())
+}
+
+pub fn set_nvapi_domain_vfp_deltas(
+    gpu: &Gpu,
+    domain: ClockDomain,
+    deltas: &[(usize, KilohertzDelta)],
+) -> Result<(), Error> {
+    use nvapi_hi::sys::gpu::clock::private::NV_GPU_CLOCK_CLIENT_CLK_VF_POINTS_CONTROL;
+
+    let info = gpu
+        .inner()
+        .vfp_info()
+        .map_err(|e| Error::Custom(format!("NvAPI vfp_info failed: {}", e)))?;
+    let domain_indices: HashSet<usize> = info.iter(domain).collect();
+
+    let mut data = NV_GPU_CLOCK_CLIENT_CLK_VF_POINTS_CONTROL {
+        mask: info.mask.mask,
+        ..Default::default()
+    };
+
+    unsafe {
+        let status = nvapi_hi::sys::api::NvAPI_GPU_ClockClientClkVfPointsGetControl(
+            *gpu.inner().handle(),
+            &mut data,
+        );
+        nvapi_hi::sys::status_result(status).map_err(|e| {
+            Error::Custom(format!(
+                "NvAPI_GPU_ClockClientClkVfPointsGetControl failed: {:?}",
+                e
+            ))
+        })?;
+    }
+
+    for &(i, delta) in deltas {
+        if !domain_indices.contains(&i) {
+            return Err(Error::Custom(format!(
+                "VFP point index {i} is not a {:?} domain point",
+                domain
+            )));
+        }
+        data.points[i].freqDeltaKHz = delta.0;
+        data.mask.set_bit(i);
+    }
+
+    unsafe {
+        let status = nvapi_hi::sys::api::NvAPI_GPU_ClockClientClkVfPointsSetControl(
+            *gpu.inner().handle(),
+            &data,
+        );
+        nvapi_hi::sys::status_result(status).map_err(|e| {
+            Error::Custom(format!(
+                "NvAPI_GPU_ClockClientClkVfPointsSetControl failed: {:?}",
+                e
+            ))
+        })?;
     }
 
     Ok(())
@@ -1181,30 +1344,6 @@ pub fn set_vfp_range(
             iter::once((offset, KilohertzDelta(delta_khz))),
             iter::empty(),
         )?;
-    }
-    Ok(())
-}
-
-/// Set the main VFP scan range, and optionally a lower range for flat-curve mode.
-pub fn set_vfp_curve(
-    gpu: &&Gpu,
-    point: usize,
-    vfp_set_range: usize,
-    flat_curve_flag: bool,
-    main_delta: i32,
-    lower_delta: Option<i32>,
-) -> Result<(), Error> {
-    if !flat_curve_flag {
-        set_vfp_range(
-            gpu,
-            (point - vfp_set_range)..=(point + vfp_set_range),
-            main_delta,
-        )?;
-    } else {
-        set_vfp_range(gpu, point..=(point + vfp_set_range), main_delta)?;
-        if let Some(ld) = lower_delta {
-            set_vfp_range(gpu, (point - vfp_set_range)..=(point - 1), ld)?;
-        }
     }
     Ok(())
 }
