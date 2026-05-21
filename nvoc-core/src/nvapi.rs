@@ -1287,7 +1287,7 @@ pub fn voltage_frequency_check(
         let readout_v = status.voltage.ok_or_else(|| Error::Custom("GPU did not report voltage in status; check if the GPU supports voltage monitoring".into()))?;
         let readout_f = status.clone().clocks;
         print_separator();
-        println!("readout volt: {:?}, freq: {:?}", readout_v, readout_f);
+        println!("[SCANNER] Rdout V: {:?}, F: {:?}", readout_v, readout_f);
 
         let current_point = status.clone().vfp.ok_or(Error::VfpUnsupported)?.graphics;
 
@@ -1305,18 +1305,18 @@ pub fn voltage_frequency_check(
             .frequency;
 
         println!(
-            "Chking Pnt: {} (volt: {}) with default freq: {}, target freq: {}",
+            "[SCANNER] Chking Pnt: {} (V: {}) with default F: {}, target F: {}",
             point, default_v, default_f, current_f
         );
 
         let sensor_v = gpu.inner().core_voltage()?;
         let sensor_f = gpu.inner().clock_frequencies(ClockFrequencyType::Current)?;
 
-        println!("current volt: {}, freq:{:?}", sensor_v, sensor_f);
+        println!("[SCANNER] current V: {}, F:{:?}", sensor_v, sensor_f);
 
         if let Some((index, vfp_point)) = find_matching_vfp_point(&current_point, sensor_v) {
             println!(
-                "Working VfPoint Inferred:{}, Volt = {:?}, Freq = {:?}",
+                "[SCANNER] Working VfPoint Inferred:{}, V = {:?}, F = {:?}",
                 index, vfp_point.voltage, vfp_point.frequency
             );
             // Some Old GPU generations report a default_frequency of 0 for
@@ -1324,13 +1324,9 @@ pub fn voltage_frequency_check(
             // reliable for self-checking — treat the point as acceptable when
             // the default frequency is zero. Otherwise, require the inferred
             // point to be near the requested point (within 5 indices).
-            if default_f.0 == 0 {
-                precise_flag = true;
-            } else {
-                precise_flag = index.abs_diff(point) < 5;
-            }
+            precise_flag = index.abs_diff(point) < 5;
         } else {
-            eprintln!("No matching VfpPoint found");
+            eprintln!("[SCANNER] No matching VfpPoint found");
             precise_flag = false;
         }
         print_separator();

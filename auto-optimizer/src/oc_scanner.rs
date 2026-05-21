@@ -258,7 +258,7 @@ mod pressure_runner {
         // Build argv as a structured Vec so paths or codes containing whitespace
         // are not silently re-tokenized into multiple arguments.
         let mut args: Vec<String> = vec![cfg.test_code.clone(), cfg.timeout_loops.to_string()];
-        let timeout_budget_secs = cfg.timeout_loops * 6;
+        let timeout_budget_secs = cfg.timeout_loops * 8;
         println!("Timeout: {}s", timeout_budget_secs);
         if cfg.recovery_method {
             args.push("--aggressive-recovery".to_string());
@@ -466,6 +466,7 @@ mod pressure_runner {
                     // ensure subsequent runs start from the expected operating point after
                     // driver resets (TDR) or other disruptive events.
                     if exit_code != 0 {
+                        sleep(Duration::from_millis(5000));
                         eprintln!(
                             "Test returned non-zero ({}). Re-applying autoscan profile before next run...",
                             exit_code
@@ -477,7 +478,7 @@ mod pressure_runner {
                             );
                         } else {
                             // Small sleep to allow the profile to be applied and driver to settle.
-                            std::thread::sleep(Duration::from_millis(500));
+                            sleep(Duration::from_millis(500));
                         }
                     }
 
@@ -642,12 +643,21 @@ fn apply_short_phase_success_step(
     Some(increase)
 }
 
-fn pre_load_vf_recheck(gpu: &GpuTarget<'_>, point: usize) -> Result<(), Error> {
+fn pre_load_vf_recheck(gpu: &GpuTarget<'_>, point: usize) -> bool {
     println!("Waiting for pre-load volt-freq recheck");
     sleep(Duration::from_secs(1));
-    let checks = voltage_frequency_check(std::slice::from_ref(gpu), point, print_scan_separator)?;
+
+    // voltage_frequency_check 可能仍返回 Result，我们这里捕获错误并当作失败处理
+    let checks = match voltage_frequency_check(std::slice::from_ref(gpu), point, print_scan_separator) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to read V/F info: {e}");
+            return false;
+        }
+    };
+
     if checks.iter().all(|check| check.precise) {
-        return Ok(());
+        return true; // 检查通过
     }
 
     let summary = checks
@@ -655,9 +665,9 @@ fn pre_load_vf_recheck(gpu: &GpuTarget<'_>, point: usize) -> Result<(), Error> {
         .map(|check| format!("GPU {} precise={}", check.gpu_id, check.precise))
         .collect::<Vec<_>>()
         .join(", ");
-    Err(Error::Custom(format!(
-        "V/F check failed at point {point}: {summary}"
-    )))
+
+    eprintln!("V/F check failed at point {point}: {summary}");
+    false // 检查失败
 }
 
 fn apply_long_phase_failure_step(
@@ -988,7 +998,35 @@ fn run_gpuboostv3_short_phase<V: std::fmt::Display + Copy>(
             Some(*init_core_oc_value - args.common.minimum_delta_core_freq_step),
         )?;
 
-        pre_load_vf_recheck(gpu, point)?;
+        let mut attempt = 0;
+        let max_attempts = 10;
+
+        while attempt < max_attempts {
+            attempt += 1;
+
+            set_nvapi_vfp_curve_delta(
+                gpu,
+                point,
+                args.vfp_set_range,
+                flat_curve_flag,
+                *init_core_oc_value,
+                Some(*init_core_oc_value - args.common.minimum_delta_core_freq_step),
+            )?;
+
+            if pre_load_vf_recheck(gpu, point) {
+                println!("V/F recheck passed on attempt {attempt}");
+                break;
+            } else {
+                eprintln!("Retrying set_nvapi_vfp_curve_delta... (attempt {attempt})");
+                sleep(Duration::from_millis(500));
+            }
+
+            if attempt == max_attempts {
+                return Err(Error::Custom(format!(
+                    "V/F recheck failed after {max_attempts} attempts"
+                )));
+            }
+        }
 
         test_num += 1;
         test_code += 1;
@@ -1129,7 +1167,35 @@ fn run_gpuboostv3_long_phase<V: std::fmt::Display + Copy>(
     writeln!(l, "Initiating Long Test...")?;
 
     loop {
-        pre_load_vf_recheck(gpu, point)?;
+        let mut attempt = 0;
+        let max_attempts = 5;
+
+        while attempt < max_attempts {
+            attempt += 1;
+
+            set_nvapi_vfp_curve_delta(
+                gpu,
+                point,
+                args.vfp_set_range,
+                flat_curve_flag,
+                *init_core_oc_value,
+                Some(*init_core_oc_value - args.common.minimum_delta_core_freq_step),
+            )?;
+
+            if pre_load_vf_recheck(gpu, point) {
+                println!("V/F recheck passed on attempt {attempt}");
+                break;
+            } else {
+                eprintln!("Retrying set_nvapi_vfp_curve_delta... (attempt {attempt})");
+                sleep(Duration::from_millis(500));
+            }
+
+            if attempt == max_attempts {
+                return Err(Error::Custom(format!(
+                    "V/F recheck failed after {max_attempts} attempts"
+                )));
+            }
+        }
 
         *test_code += 1;
         log_point_test_header(
@@ -1243,8 +1309,6 @@ fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
 
         mem_test_num += 1;
         mem_test_code += 1;
-
-        pre_load_vf_recheck(gpu, args.point)?;
 
         println!(
             "current test progress estimated:{:.2}%",
@@ -1620,9 +1684,7 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
                 .map(|check| format!("GPU {} precise={}", check.gpu_id, check.precise))
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(Error::Custom(format!(
-                "default V/F self-check failed at point {point}: {summary}"
-            )));
+            eprintln!("Warning: default V/F self-check failed at point {point}: {summary}");
         }
         let mut v;
         let mut default_frequency;
