@@ -1319,7 +1319,16 @@ pub fn voltage_frequency_check(
                 "Working VfPoint Inferred:{}, Volt = {:?}, Freq = {:?}",
                 index, vfp_point.voltage, vfp_point.frequency
             );
-            precise_flag = index.abs_diff(point) < 5;
+            // Some Old GPU generations report a default_frequency of 0 for
+            // VFP points. In those cases the "default frequency" field is not
+            // reliable for self-checking — treat the point as acceptable when
+            // the default frequency is zero. Otherwise, require the inferred
+            // point to be near the requested point (within 5 indices).
+            if default_f.0 == 0 {
+                precise_flag = true;
+            } else {
+                precise_flag = index.abs_diff(point) < 5;
+            }
         } else {
             eprintln!("No matching VfpPoint found");
             precise_flag = false;

@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::time::SystemTime;
 
-use std::{fs, iter};
+use std::fs;
 
 fn run_output<O: GpuOperation>(gpu: &GpuTarget<'_>, op: O) -> Result<O::Output, Error> {
     run(gpu, op).map(|report| report.output)
@@ -458,6 +458,26 @@ mod pressure_runner {
                                     "Warning: Failed to query Windows Event Log for this run."
                                 );
                             }
+                        }
+                    }
+
+                    // If a run failed (non-zero exit), re-apply the autoscan profile to
+                    // restore the locked volt/freq state before the next test. This helps
+                    // ensure subsequent runs start from the expected operating point after
+                    // driver resets (TDR) or other disruptive events.
+                    if exit_code != 0 {
+                        eprintln!(
+                            "Test returned non-zero ({}). Re-applying autoscan profile before next run...",
+                            exit_code
+                        );
+                        if let Err(e) = apply_autoscan_profile(gpu, _matches, 80) {
+                            eprintln!(
+                                "Warning: apply_autoscan_profile failed during failure-recovery: {:?}",
+                                e
+                            );
+                        } else {
+                            // Small sleep to allow the profile to be applied and driver to settle.
+                            std::thread::sleep(Duration::from_millis(500));
                         }
                     }
 
