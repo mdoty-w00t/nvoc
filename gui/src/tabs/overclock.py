@@ -3,9 +3,11 @@ Overclock Tab - OC offset (slider + entry) and power/thermal limits.
 Ranges are queried from GPU hardware via the CLI 'info' command.
 """
 
-import customtkinter as ctk
 from typing import TYPE_CHECKING, Tuple, Dict, Any, Optional, Union
-from src.tabs.fan_control import FanControlTab
+
+import customtkinter as ctk
+
+from src.panes.fan_control import FanControlPane
 from src.widgets.lightweight_controls import (
     CanvasSlider,
     LiteButton,
@@ -264,7 +266,9 @@ class OverclockTab:
 
         fan_frame = ctk.CTkFrame(scroll)
         fan_frame.pack(fill="x", pady=(0, 10))
-        self.fan_section = FanControlTab(fan_frame, self.app, embedded=True)
+        self.fan_section = FanControlPane(
+            fan_frame, self.app.backend, embedded=True
+        )
         self._limit_enabled_frame_color = self.limit_frame.cget("fg_color")
         self._limit_dim_frame_color = ("gray86", "gray20")
         self._limit_enabled_title_color = self.limit_title_label.cget("text_color")

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 import pystray
 from PIL import Image
 
+from src.backend import CliBackend
 from src.cli_runner import CLIRunner
 from src.config import Config
 from src.widgets.output_console import OutputConsole
@@ -122,6 +123,7 @@ class App(ctk.CTk):
         self._vfp_offset_state_cache = None  # type: Optional[Tuple[bool, Optional[int]]]
         self._vfp_offset_refresh_inflight = False  # is a worker running now
         self._pending_vfp_offset_refresh = False  # do we need one more run
+        self.backend = CliBackend(self)
 
         # Guard to suppress _on_gpu_changed during programmatic gpu_var.set() calls
         self._programmatic_gpu_set: bool = False
