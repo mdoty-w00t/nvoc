@@ -264,11 +264,7 @@ mod pressure_runner {
         }
     }
 
-    fn retry_nvapi_with_backoff<F, E>(
-        mut op: F,
-        label: &str,
-        on_err: E,
-    ) -> Result<(), Error>
+    fn retry_nvapi_with_backoff<F, E>(mut op: F, label: &str, on_err: E) -> Result<(), Error>
     where
         F: FnMut() -> Result<(), Error>,
         E: Fn(&Error),
@@ -295,12 +291,7 @@ mod pressure_runner {
                     return Ok(());
                 }
                 Err(e) if attempt + 1 < BACKOFF_SECS.len() => {
-                    eprintln!(
-                        "{} failed (attempt {}): {:?}",
-                        label,
-                        attempt + 1,
-                        e
-                    );
+                    eprintln!("{} failed (attempt {}): {:?}", label, attempt + 1, e);
                     on_err(&e);
                 }
                 Err(e) => {
@@ -729,10 +720,7 @@ mod pressure_runner {
                             || apply_autoscan_profile(gpu, _matches, 80),
                             "apply_autoscan_profile",
                             |e| {
-                                eprintln!(
-                                    "apply_autoscan_profile attempt failed: {:?}",
-                                    e
-                                );
+                                eprintln!("apply_autoscan_profile attempt failed: {:?}", e);
                             },
                         );
                         // Small sleep to allow the profile to settle.
