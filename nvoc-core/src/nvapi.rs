@@ -1129,8 +1129,7 @@ pub fn voltage_frequency_check(
 
         let sensor_v = gpu.inner().core_voltage()?;
 
-        if let Some((index, vfp_point)) = find_matching_vfp_point(&current_point, sensor_v) {
-            let _ = (readout_v, default_v, vfp_point);
+        if let Some((index, _vfp_point)) = find_matching_vfp_point(&current_point, sensor_v) {
             precise_flag = index.abs_diff(point) < 5;
         } else {
             precise_flag = false;
