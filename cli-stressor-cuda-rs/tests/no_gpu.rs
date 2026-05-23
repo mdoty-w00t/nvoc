@@ -1,6 +1,7 @@
 use cli_stressor_cuda_rs::{
     KernelType, StressResult, choose_tolerance, parse_int_list, parse_kernel_mixture,
-    parse_kernel_param_overrides, parse_kernel_type_list, parse_stream_mode, per_element_allclose,
+    parse_kernel_param_overrides, parse_kernel_type_list, parse_precision_mixture,
+    parse_stream_mode, per_element_allclose,
 };
 
 #[test]
@@ -69,6 +70,17 @@ fn test_parse_kernel_mixture() {
 }
 
 #[test]
+fn test_parse_kernel_mixture_rejects_invalid_kernel_name() {
+    let types = parse_kernel_type_list("gemm,memcpy").unwrap();
+    assert!(parse_kernel_mixture("gemm|memcpy:0.5", &types).is_err());
+}
+
+#[test]
+fn test_parse_precision_mixture_rejects_invalid_precision_name() {
+    assert!(parse_precision_mixture("fp32|fp16:0.5").is_err());
+}
+
+#[test]
 fn test_parse_stream_mode() {
     let mode = parse_stream_mode("dual").unwrap();
     assert_eq!(mode.stream_count(), 2);
@@ -83,7 +95,7 @@ fn test_parse_kernel_param_overrides() {
     assert_eq!(items.len(), 2);
     assert!(items.iter().any(|v| {
         v.kind == KernelType::Gemm
-            && v.matrix_sizes.as_ref().map(|s| s.as_slice()) == Some(&[2049, 4096])
+            && v.matrix_sizes.as_deref() == Some(&[2049, 4096])
             && v.warmup_iters == Some(4)
             && v.burst_iters == Some(8)
     }));

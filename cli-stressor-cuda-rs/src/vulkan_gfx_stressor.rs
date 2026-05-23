@@ -1,6 +1,7 @@
+use crate::style::stylize;
+use anstream::eprintln;
 use ash::{Instance, vk};
 use cli_stressor_cuda_rs::PciBusAddress;
-use nvoc_core::color::stylize;
 use rand::Rng;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ impl VulkanGraphicsEngine {
         }
     }
 
+    #[cfg(feature = "cuda")]
     pub fn with_selection(selection: VulkanDeviceSelection) -> Self {
         Self {
             is_running: Arc::new(AtomicBool::new(false)),
@@ -52,7 +54,7 @@ impl VulkanGraphicsEngine {
             if let Err(e) = run_vulkan_stress_loop(is_running, selection) {
                 eprintln!(
                     "{}",
-                    stylize(&format!("[VKGFX] Thread crashed: {:?}", e), true)
+                    stylize(&format!("[VulkanGfx] Thread crashed: {:?}", e), true)
                 );
                 has_error.store(true, Ordering::SeqCst);
             }
@@ -68,11 +70,15 @@ impl VulkanGraphicsEngine {
         self.has_error.clone()
     }
 
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.is_running.store(false, Ordering::SeqCst);
-        if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.thread_handle.take()
+            && handle.join().is_err()
+        {
+            self.has_error.store(true, Ordering::SeqCst);
+            return Err(std::io::Error::other("Vulkan stress thread panicked").into());
         }
+        Ok(())
     }
 }
 
@@ -82,9 +88,8 @@ fn run_vulkan_stress_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         let entry = ash::Entry::load()?;
-        let app_name = CStr::from_bytes_with_nul_unchecked(b"HeadlessStressor\0");
         let app_info = vk::ApplicationInfo::default()
-            .application_name(app_name)
+            .application_name(c"HeadlessStressor")
             .api_version(vk::API_VERSION_1_2);
 
         let instance_create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
@@ -97,10 +102,7 @@ fn run_vulkan_stress_loop(
                 select_gpu_by_cuda_uuid(&instance, selection.cuda_uuid)
             };
             selection_result.map_err(|err| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Vulkan GPU selection failed: {err}"),
-                )
+                std::io::Error::other(format!("Vulkan GPU selection failed: {err}"))
             })?
         } else {
             let pdevices = instance.enumerate_physical_devices()?;
@@ -114,7 +116,8 @@ fn run_vulkan_stress_loop(
         let graphics_queue_index = queue_family_properties
             .iter()
             .position(|info| info.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-            .expect("No Graphics queue family found") as u32;
+            .ok_or("No Vulkan graphics queue family found")?
+            as u32;
 
         let queue_priorities = [1.0];
         let queue_create_infos = [vk::DeviceQueueCreateInfo::default()
@@ -173,18 +176,14 @@ fn run_vulkan_stress_loop(
             let img = device.create_image(&image_create_info, None)?;
             let mem_req = device.get_image_memory_requirements(img);
 
-            let mut mem_type_idx = 0;
-            for i in 0..mem_properties.memory_type_count {
-                if (mem_req.memory_type_bits & (1 << i)) != 0 {
-                    if mem_properties.memory_types[i as usize]
-                        .property_flags
-                        .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
-                    {
-                        mem_type_idx = i;
-                        break;
-                    }
-                }
-            }
+            let mem_type_idx = (0..mem_properties.memory_type_count)
+                .find(|&i| {
+                    (mem_req.memory_type_bits & (1 << i)) != 0
+                        && mem_properties.memory_types[i as usize]
+                            .property_flags
+                            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                })
+                .ok_or("No compatible DEVICE_LOCAL Vulkan memory type found")?;
 
             let alloc_info = vk::MemoryAllocateInfo::default()
                 .allocation_size(mem_req.size)
@@ -344,7 +343,7 @@ fn run_vulkan_stress_loop(
                     "{}",
                     stylize(
                         &format!(
-                            "[VKGFX] {:>6.1}s | {:>5.1} submits/s | Pipeline Flushes: {}",
+                            "[Vulkan GFX] {:>6.1}s | {:>5.1} submits/s (randomized interval) | Active DWM preemption stress | Pipeline Flushes: {}",
                             elapsed_s, submits_per_s, pipeline_flushes
                         ),
                         false
@@ -409,7 +408,7 @@ pub fn select_gpu_by_cuda_identity(
         "{}",
         stylize(
             &format!(
-                "[VKGFX] Target CUDA UUID: {}{}",
+                "[VulkanGfx] Target CUDA UUID: {}{}",
                 target_uuid_hex,
                 if let Some(pci) = &target_pci_hex {
                     format!(" | target PCI: {pci}")
@@ -431,7 +430,7 @@ pub fn select_gpu_by_cuda_identity(
                 println!(
                     "{}",
                     stylize(
-                        &format!("[VKGFX] Failed to query device identity: {err}"),
+                        &format!("[VulkanGfx] Failed to query device identity: {err}"),
                         false
                     )
                 );
@@ -443,7 +442,7 @@ pub fn select_gpu_by_cuda_identity(
             "{}",
             stylize(
                 &format!(
-                    "[VKGFX] Checking device: {} | uuid={} | pci={}",
+                    "[VulkanGfx] Checking device: {} | uuid={} | pci={}",
                     device_name,
                     device_uuid_hex,
                     device_pci
@@ -459,21 +458,19 @@ pub fn select_gpu_by_cuda_identity(
             println!(
                 "{}",
                 stylize(
-                    &format!("[VKGFX] Selected Vulkan device by UUID match: {device_name}"),
+                    &format!("[VulkanGfx] Selected Vulkan device by UUID match: {device_name}"),
                     false
                 )
             );
             return Ok(pdevice);
         }
 
-        if pci_fallback_candidate.is_none() {
-            if let (Some(target_pci), Some(device_pci)) =
+        if pci_fallback_candidate.is_none()
+            && let (Some(target_pci), Some(device_pci)) =
                 (target_cuda_pci.as_ref(), device_pci.as_ref())
-            {
-                if target_pci == device_pci {
-                    pci_fallback_candidate = Some(pdevice);
-                }
-            }
+            && target_pci == device_pci
+        {
+            pci_fallback_candidate = Some(pdevice);
         }
     }
 

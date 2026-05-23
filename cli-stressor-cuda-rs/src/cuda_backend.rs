@@ -1,7 +1,7 @@
 use cli_stressor_cuda_rs::PciBusAddress;
 use cli_stressor_cuda_rs::{
-    Backend, BackendError, CudaDeviceEnumInfo, DeviceInfo, HostMatrix, KernelType, PrecisionKind,
-    PrecisionSpec, StreamMode, make_random_host_matrix,
+    Backend, BackendError, CudaDeviceEnumInfo, DeviceInfo, HostMatrix, KernelPathRequest,
+    KernelType, PrecisionKind, PrecisionSpec, StreamMode, make_random_host_matrix,
 };
 use cudarc::cublas::{Asum, AsumConfig, CudaBlas, Gemm, GemmConfig, sys as cublas_sys};
 use cudarc::driver::sys as cuda_sys;
@@ -22,6 +22,16 @@ use std::time::Instant;
 pub struct CudaDeviceIdentity {
     pub uuid: [u8; 16],
     pub pci_bus: Option<PciBusAddress>,
+}
+
+struct GemmPathConfig<'a> {
+    spec: &'a PrecisionSpec,
+    size: usize,
+    warmup_iters: u32,
+    burst_iters: u32,
+    transpose_prob: f64,
+    seed: u64,
+    stream_mode: StreamMode,
 }
 
 pub struct CudaBackend {
@@ -147,16 +157,16 @@ impl CudaBackend {
         }
     }
 
-    fn run_gemm_path(
-        &self,
-        spec: &PrecisionSpec,
-        size: usize,
-        warmup_iters: u32,
-        burst_iters: u32,
-        transpose_prob: f64,
-        seed: u64,
-        stream_mode: StreamMode,
-    ) -> Result<f64, BackendError> {
+    fn run_gemm_path(&self, config: GemmPathConfig<'_>) -> Result<f64, BackendError> {
+        let GemmPathConfig {
+            spec,
+            size,
+            warmup_iters,
+            burst_iters,
+            transpose_prob,
+            seed,
+            stream_mode,
+        } = config;
         let mut rng = StdRng::seed_from_u64(seed);
         let transpose_a = rng.random::<f64>() < transpose_prob;
         let transpose_b = rng.random::<f64>() < transpose_prob;
@@ -552,9 +562,9 @@ impl CudaBackend {
             );
         }
         for _ in 0..warmup_iters {
-            for lane in 0..lane_count {
+            for (lane, buf) in bufs.iter_mut().enumerate().take(lane_count) {
                 self.stream_for_lane(lane)
-                    .memset_zeros(&mut bufs[lane])
+                    .memset_zeros(buf)
                     .map_err(|err| BackendError::Other(err.to_string()))?;
             }
         }
@@ -566,9 +576,9 @@ impl CudaBackend {
 
         let op_start = Instant::now();
         for _ in 0..burst_iters {
-            for lane in 0..lane_count {
+            for (lane, buf) in bufs.iter_mut().enumerate().take(lane_count) {
                 self.stream_for_lane(lane)
-                    .memset_zeros(&mut bufs[lane])
+                    .memset_zeros(buf)
                     .map_err(|err| BackendError::Other(err.to_string()))?;
             }
         }
@@ -1119,19 +1129,20 @@ impl Backend for CudaBackend {
         }
     }
 
-    fn run_kernel_path(
-        &mut self,
-        spec: &PrecisionSpec,
-        kind: KernelType,
-        size: usize,
-        warmup_iters: u32,
-        burst_iters: u32,
-        transpose_prob: f64,
-        seed: u64,
-        stream_mode: StreamMode,
-    ) -> Result<f64, BackendError> {
+    fn run_kernel_path(&mut self, request: KernelPathRequest<'_>) -> Result<f64, BackendError> {
+        let KernelPathRequest {
+            spec,
+            kind,
+            size,
+            warmup_iters,
+            burst_iters,
+            transpose_prob,
+            seed,
+            stream_mode,
+        } = request;
+
         match kind {
-            KernelType::Gemm => self.run_gemm_path(
+            KernelType::Gemm => self.run_gemm_path(GemmPathConfig {
                 spec,
                 size,
                 warmup_iters,
@@ -1139,7 +1150,7 @@ impl Backend for CudaBackend {
                 transpose_prob,
                 seed,
                 stream_mode,
-            ),
+            }),
             KernelType::Memcpy => {
                 self.run_memcpy_path(spec, size, warmup_iters, burst_iters, seed, stream_mode)
             }
@@ -1334,14 +1345,14 @@ pub fn resolve_device_index_by_pci_bus(target_pci: PciBusAddress) -> Result<u32,
     let devices =
         enumerate_cuda_devices().map_err(|e| format!("failed to enumerate devices: {e}"))?;
     for dev in &devices {
-        if let Some(pci) = dev.pci_bus {
-            if pci == target_pci {
-                println!(
-                    "[CUDA] Selected device index {} by PCI match: {}",
-                    dev.device_index, dev.device_name
-                );
-                return Ok(dev.device_index);
-            }
+        if let Some(pci) = dev.pci_bus
+            && pci == target_pci
+        {
+            println!(
+                "[CUDA] Selected device index {} by PCI match: {}",
+                dev.device_index, dev.device_name
+            );
+            return Ok(dev.device_index);
         }
     }
     Err(format!(
