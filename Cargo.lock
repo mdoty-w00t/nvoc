@@ -253,6 +253,7 @@ dependencies = [
  "cudarc",
  "half",
  "matrixmultiply",
+ "nvoc-core",
  "rand",
  "rand_distr",
  "serde",

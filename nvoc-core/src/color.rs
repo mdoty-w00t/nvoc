@@ -48,7 +48,28 @@ fn style_keyword(core: &str, is_stderr: bool) -> String {
         return core.green().bold().to_string();
     }
     if lower.contains("scanner") || lower.contains("point") || lower.contains("gpu") {
-        return core.bright_blue().bold().to_string();
+        return core.bright_cyan().bold().to_string();
+    }
+    if lower == "gemm" {
+        return core.bright_red().bold().to_string();
+    }
+    if lower == "memcpy" {
+        return core.bright_green().bold().to_string();
+    }
+    if lower == "memset" {
+        return core.bright_yellow().bold().to_string();
+    }
+    if lower == "transpose" {
+        return core.bright_magenta().bold().to_string();
+    }
+    if lower == "elementwise" {
+        return core.bright_cyan().bold().to_string();
+    }
+    if lower == "reduction" {
+        return core.bright_cyan().bold().to_string();
+    }
+    if lower == "atomic" {
+        return core.bright_red().bold().to_string();
     }
     if is_stderr {
         core.bright_white().to_string()
@@ -72,11 +93,7 @@ fn style_value(core: &str, is_stderr: bool) -> String {
         return core.bright_green().bold().to_string();
     }
     if is_numeric_like(core) {
-        return if is_stderr {
-            core.bright_cyan().bold().to_string()
-        } else {
-            core.bright_blue().bold().to_string()
-        };
+        return core.bright_cyan().bold().to_string();
     }
     style_keyword(core, is_stderr)
 }
@@ -97,7 +114,7 @@ pub fn stylize_title(title: &str) -> String {
         return title.green().bold().to_string();
     }
     if lower.contains("[scanner]") || lower.contains("scanner") {
-        return title.bright_blue().bold().to_string();
+        return title.bright_cyan().bold().to_string();
     }
     if lower.contains("power") || lower.contains("tdp") {
         return title.bright_red().bold().to_string();
@@ -143,6 +160,14 @@ pub fn stylize(message: &str, is_stderr: bool) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub fn stylize_config(message: &str) -> String {
+    if std::env::var_os("NO_COLOR").is_some() {
+        message.to_string()
+    } else {
+        message.bright_cyan().bold().to_string()
+    }
 }
 
 /// 专为 SCANNER/调试行设计的着色器。

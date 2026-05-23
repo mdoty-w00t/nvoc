@@ -88,12 +88,8 @@ mod scan_cli_color {
         }
     }
 
-    fn style_number(core: &str, is_stderr: bool) -> String {
-        if is_stderr {
-            core.bright_cyan().bold().to_string()
-        } else {
-            core.bright_blue().bold().to_string()
-        }
+    fn style_number(core: &str, _is_stderr: bool) -> String {
+        core.bright_cyan().bold().to_string()
     }
 
     fn style_keyword(core: &str, is_stderr: bool) -> String {
@@ -111,7 +107,7 @@ mod scan_cli_color {
             return core.green().bold().to_string();
         }
         if lower.contains("scanner") || lower.contains("point") || lower.contains("gpu") {
-            return core.bright_blue().bold().to_string();
+            return core.bright_cyan().bold().to_string();
         }
         if lower.contains("voltage") || lower.contains("uv") || lower.contains("mv") {
             return core.bright_magenta().bold().to_string();
@@ -264,7 +260,11 @@ mod pressure_runner {
         }
     }
 
-    fn retry_nvapi_with_backoff<F, E>(mut op: F, label: &str, on_err: E) -> Result<(), Error>
+    fn retry_nvapi_with_backoff<F, E>(
+        mut op: F,
+        label: &str,
+        on_err: E,
+    ) -> Result<(), Error>
     where
         F: FnMut() -> Result<(), Error>,
         E: Fn(&Error),
@@ -291,7 +291,12 @@ mod pressure_runner {
                     return Ok(());
                 }
                 Err(e) if attempt + 1 < BACKOFF_SECS.len() => {
-                    eprintln!("{} failed (attempt {}): {:?}", label, attempt + 1, e);
+                    eprintln!(
+                        "{} failed (attempt {}): {:?}",
+                        label,
+                        attempt + 1,
+                        e
+                    );
                     on_err(&e);
                 }
                 Err(e) => {
@@ -720,7 +725,10 @@ mod pressure_runner {
                             || apply_autoscan_profile(gpu, _matches, 80),
                             "apply_autoscan_profile",
                             |e| {
-                                eprintln!("apply_autoscan_profile attempt failed: {:?}", e);
+                                eprintln!(
+                                    "apply_autoscan_profile attempt failed: {:?}",
+                                    e
+                                );
                             },
                         );
                         // Small sleep to allow the profile to settle.
