@@ -454,70 +454,74 @@ class DashboardTab:
         pwr_w: Optional[float] = None
         locked: Optional[bool] = None
 
-        for raw in output.splitlines():
-            line = raw.strip()
-            low = line.lower()
+        native_payload = self.app._native_query_payload(output)
+        if native_payload is not None:
+            gpu_mhz = self._as_float(native_payload.get("gpu_clock_mhz"))
+            mem_mhz = self._as_float(native_payload.get("mem_clock_mhz"))
+            volt_mv = self._as_float(native_payload.get("voltage_mv"))
+            temp_c = self._as_float(native_payload.get("temperature_c"))
+            pwr_w = self._as_float(native_payload.get("power_w"))
+            locked_value = native_payload.get("vfp_locked")
+            locked = bool(locked_value) if isinstance(locked_value, bool) else None
+        else:
+            for raw in output.splitlines():
+                line = raw.strip()
+                low = line.lower()
 
-            # Core / GPU clock  – "Graphics Clock : 1897 MHz"
-            if gpu_mhz is None and re.search(
-                r"graphics.clock|core.clock|gpu.clock", low
-            ):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*mhz", low)
-                if m:
-                    gpu_mhz = float(m.group(1))
+                # Core / GPU clock  – "Graphics Clock : 1897 MHz"
+                if gpu_mhz is None and re.search(
+                    r"graphics.clock|core.clock|gpu.clock", low
+                ):
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*mhz", low)
+                    if m:
+                        gpu_mhz = float(m.group(1))
 
-            # Memory clock  – "Memory Clock : 7500 MHz"
-            if mem_mhz is None and re.search(r"mem(?:ory)?.clock", low):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*mhz", low)
-                if m:
-                    mem_mhz = float(m.group(1))
+                # Memory clock  – "Memory Clock : 7500 MHz"
+                if mem_mhz is None and re.search(r"mem(?:ory)?.clock", low):
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*mhz", low)
+                    if m:
+                        mem_mhz = float(m.group(1))
 
-            # Core voltage  – "Core Voltage : 918 mV  (locked)"
-            # User sample: "Core Voltage........: 1100 mV"
-            if volt_mv is None and re.search(r"(?:core|gpu).volt(?:age)?", low):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*mv", low)
-                if m:
-                    volt_mv = float(m.group(1))
-                if re.search(r"\(locked\)", low):
-                    locked = True
-                elif locked is None:
-                    locked = False
+                # Core voltage  – "Core Voltage : 918 mV  (locked)"
+                # User sample: "Core Voltage........: 1100 mV"
+                if volt_mv is None and re.search(r"(?:core|gpu).volt(?:age)?", low):
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*mv", low)
+                    if m:
+                        volt_mv = float(m.group(1))
+                    if re.search(r"\(locked\)", low):
+                        locked = True
+                    elif locked is None:
+                        locked = False
 
-            # VFP Lock check (independent line) – "VFP Lock............: Voltage:1225 mV"
-            # This line indicates the LOCK IS ACTIVE, but we SHOULD NOT overwrite volt_mv
-            # with this value if we want to show the ACTUAL current voltage.
-            if re.search(r"vfp.lock", low):
-                if re.search(r"voltage:(\d+(?:\.\d+)?)\s*mv", low):
-                    locked = True
-                    # Do NOT overwrite volt_mv here, as VFP Lock shows the target,
-                    # while "Core Voltage" shows the current physical reading.
+                # VFP Lock check (independent line) – "VFP Lock............: Voltage:1225 mV"
+                if re.search(r"vfp.lock", low):
+                    if re.search(r"voltage:(\d+(?:\.\d+)?)\s*mv", low):
+                        locked = True
 
-            # Temperature  – "Sensor..............: 47C (Internal / Core)"
-            if temp_c is None and "sensor" in low:
-                m = re.search(r"(\d+(?:\.\d+)?)\s*c\b", low)
-                if m:
-                    temp_c = float(m.group(1))
-            # Fallback: any line with "temp"
-            if temp_c is None and "temp" in low:
-                m = re.search(r"(\d+(?:\.\d+)?)\s*(?:°?c\b|celsius)", low)
-                if m:
-                    temp_c = float(m.group(1))
+                # Temperature  – "Sensor..............: 47C (Internal / Core)"
+                if temp_c is None and "sensor" in low:
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*c\b", low)
+                    if m:
+                        temp_c = float(m.group(1))
+                # Fallback: any line with "temp"
+                if temp_c is None and "temp" in low:
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:°?c\b|celsius)", low)
+                    if m:
+                        temp_c = float(m.group(1))
 
-            # Power  – "Power Usage.........: 23% (Total Power), 23% (Normalized Power)"
-            if pwr_w is None and re.search(r"power.usage", low):
-                # Prefer Normalized Power (second percentage)
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*\(normalized", low)
-                if not m:
-                    m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*\(total", low)
-                if m:
-                    pwr_w = float(m.group(1))
-            # Fallback for power: "... | 87 W current" as seen in info
-            if pwr_w is None and re.search(
-                r"power.(?:draw|consumption)|power\s*:", low
-            ):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*w\b", low)
-                if m:
-                    pwr_w = float(m.group(1))
+                # Power  – "Power Usage.........: 23% (Total Power), 23% (Normalized Power)"
+                if pwr_w is None and re.search(r"power.usage", low):
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*\(normalized", low)
+                    if not m:
+                        m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*\(total", low)
+                    if m:
+                        pwr_w = float(m.group(1))
+                if pwr_w is None and re.search(
+                    r"power.(?:draw|consumption)|power\s*:", low
+                ):
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*w\b", low)
+                    if m:
+                        pwr_w = float(m.group(1))
 
         # Fallback: check vfcurve lock state
         if locked is None and getattr(self.app, "tab_vfcurve", None):
@@ -561,6 +565,12 @@ class DashboardTab:
 
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self._status_lbl.configure(text=f"✓ {ts}  ({parsed}/5 metrics parsed)")
+
+    @staticmethod
+    def _as_float(value: object) -> Optional[float]:
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
 
     # ── Quick-access button handlers ──────────────────────────────────────────
     def _refresh_info(self) -> None:

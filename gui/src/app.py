@@ -5,6 +5,7 @@ NVOC-GUI Application - Main application window.
 import csv
 import customtkinter as ctk
 import ctypes
+import json
 import os
 import re
 import sys
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 import pystray
 from PIL import Image
 
-from src.backend import CliBackend
+from src.backend import NativeBackend
 from src.cli_runner import CLIRunner
 from src.config import Config
 from src.widgets.output_console import OutputConsole
@@ -123,7 +124,7 @@ class App(ctk.CTk):
         self._vfp_offset_state_cache = None  # type: Optional[Tuple[bool, Optional[int]]]
         self._vfp_offset_refresh_inflight = False  # is a worker running now
         self._pending_vfp_offset_refresh = False  # do we need one more run
-        self.backend = CliBackend(self)
+        self.backend = NativeBackend(self)
 
         # Guard to suppress _on_gpu_changed during programmatic gpu_var.set() calls
         self._programmatic_gpu_set: bool = False
@@ -392,15 +393,84 @@ class App(ctk.CTk):
         return
 
     def _refresh_gpu_list(self):
-        """Run 'list' command and populate GPU dropdown."""
+        """Query native GPU discovery and populate GPU dropdown."""
         self.console.append("[GUI] Detecting GPUs...\n")
 
         def _worker():
-            runner = CLIRunner(self.runner.exe_path, on_output=lambda _: None)
-            retcode, output = runner.run_sync(["list"], cwd=self.cli_cwd)
-            self.after(0, lambda: self._parse_gpu_list(retcode, output))
+            retcode, output, gpus = self.backend.list_gpus()
+            self.after(0, lambda: self._apply_gpu_list(retcode, output, gpus))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_gpu_list(
+        self, retcode: int, output: str, items: List[Dict[str, Any]]
+    ) -> None:
+        """Apply native GPU discovery results to the dropdown."""
+        self.console.append(output if output.endswith("\n") else f"{output}\n")
+        if retcode != 0:
+            self.console.append("[GUI] Failed to detect GPUs.\n")
+            self.gpu_dropdown.configure(values=["(detection failed)"])
+            self.gpu_var.set("(detection failed)")
+            return
+
+        short_labels: Dict[int, str] = {}
+        long_labels: Dict[int, str] = {}
+        gpu_names: Dict[int, str] = {}
+        gpu_uuid_map: Dict[int, str] = {}
+
+        for fallback_idx, item in enumerate(items):
+            try:
+                idx = int(item.get("index", fallback_idx))
+            except (TypeError, ValueError):
+                idx = fallback_idx
+            name = str(item.get("name") or f"GPU {idx}")
+            gpu_id_hex = str(item.get("gpu_id_hex") or "").strip()
+            short = f"GPU {idx}: {name}"
+            long = f"{short}  [{gpu_id_hex}]" if gpu_id_hex else short
+            short_labels[idx] = short
+            long_labels[idx] = long
+            gpu_names[idx] = name
+            if gpu_id_hex:
+                gpu_uuid_map[idx] = gpu_id_hex
+            arch = str(item.get("arch") or item.get("codename") or "").strip()
+            if arch:
+                self.gpu_arches[idx] = arch
+
+        ordered_indices = sorted(short_labels.keys())
+        if not ordered_indices:
+            self.gpu_dropdown.configure(values=["(no GPUs found)"])
+            self._programmatic_gpu_set = True
+            try:
+                self.gpu_var.set("(no GPUs found)")
+            finally:
+                self._programmatic_gpu_set = False
+            return
+
+        self.gpu_map = {}
+        for idx in ordered_indices:
+            self.gpu_map[short_labels[idx]] = idx
+            self.gpu_map[long_labels[idx]] = idx
+        self._gpu_short_label_by_idx = short_labels
+        self._gpu_long_label_by_idx = long_labels
+        self.gpu_names = gpu_names
+        self.gpu_uuid_map = gpu_uuid_map
+
+        self.gpu_dropdown.configure(values=[long_labels[i] for i in ordered_indices])
+        last_idx_raw = str(self.config.get("last_gpu_idx", "")).strip()
+        last_idx = int(last_idx_raw) if last_idx_raw.isdigit() else None
+        last = self.config.get("last_gpu_id", "")
+        if last_idx is None and last in self.gpu_map:
+            last_idx = self.gpu_map[last]
+        if last_idx not in ordered_indices:
+            last_idx = ordered_indices[0]
+
+        self._programmatic_gpu_set = True
+        try:
+            self.gpu_var.set(short_labels[last_idx])
+        finally:
+            self._programmatic_gpu_set = False
+        self.console.append(f"[GUI] Found {len(ordered_indices)} GPU(s).\n")
+        self._query_gpu_info()
 
     def _parse_gpu_list(self, retcode: int, output: str):
         """Parse GPU list output and update dropdown."""
@@ -571,87 +641,97 @@ class App(ctk.CTk):
         if current_gpu_idx is not None and current_gpu_idx in self.gpu_arches:
             limits["gpu_architecture"] = self.gpu_arches[current_gpu_idx]
 
-        for line in output.split("\n"):
-            line = line.strip()
-
-            # Architecture........: GM200:161 (dGPU)
-            if line.startswith("Architecture"):
-                parts = line.split(":", 1)
-                if len(parts) == 2:
-                    arch = parts[1].strip()
-                    if arch:
-                        limits["gpu_architecture"] = arch
-                        if current_gpu_idx is not None:
-                            self.gpu_arches[current_gpu_idx] = arch
-
-            # VFP (Graphics)......: -500 MHz ~ 500 MHz
-            elif line.startswith("VFP (Graphics)"):
-                m = re.search(r"(-?\d+)\s*MHz\s*~\s*(-?\d+)\s*MHz", line)
-                if m:
-                    limits["core_clock_min"] = int(m.group(1))
-                    limits["core_clock_max"] = int(m.group(2))
-
-            # VFP (Memory)........: -500 MHz ~ 1500 MHz
-            elif line.startswith("VFP (Memory)"):
-                m = re.search(r"(-?\d+)\s*MHz\s*~\s*(-?\d+)\s*MHz", line)
-                if m:
-                    limits["mem_clock_min"] = int(m.group(1))
-                    limits["mem_clock_max"] = int(m.group(2))
-
-            # Power Limit.........: 58% ~ 124% (100% default) | 100W min / 211W current / 212W max
-            elif line.startswith("Power Limit"):
-                m = re.search(r"(\d+)%\s*~\s*(\d+)%\s*\((\d+)%\s*default\)", line)
-                if m:
-                    limits["power_limit_min"] = int(m.group(1))
-                    limits["power_limit_max"] = int(m.group(2))
-                    limits["power_limit_default"] = int(m.group(3))
-                # Parse current percentage: "... | 100W min / 211W current / 212W max"
-                # Also try to parse current % directly if present
-                mc = re.search(r"\|\s*(\d+)%\s*current", line)
-                if mc:
-                    limits["power_limit_current"] = int(mc.group(1))
-                # Parse absolute watt values: "100W min / 211W current / 212W max"
-                mw = re.search(
-                    r"(\d+)W\s*min\s*/\s*(\d+)W\s*current\s*/\s*(\d+)W\s*max", line
+        native_payload = self._native_query_payload(output)
+        if native_payload is not None:
+            limits.update(native_payload)
+            if current_gpu_idx is not None and native_payload.get("gpu_architecture"):
+                self.gpu_arches[current_gpu_idx] = str(
+                    native_payload["gpu_architecture"]
                 )
-                if mw:
-                    limits["power_watt_min"] = int(mw.group(1))
-                    limits["power_watt_current"] = int(mw.group(2))
-                    limits["power_watt_max"] = int(mw.group(3))
+        else:
+            for line in output.split("\n"):
+                line = line.strip()
 
-            # Thermal Limit.......: 65C ~ 90C (83C default)
-            elif line.startswith("Thermal Limit"):
-                m = re.search(
-                    r"(\d+)\s*C\s*~\s*(\d+)\s*C\s*\((\d+)\s*C\s*default\)", line
-                )
-                if m:
-                    limits["thermal_limit_min"] = int(m.group(1))
-                    limits["thermal_limit_max"] = int(m.group(2))
-                    limits["thermal_limit_default"] = int(m.group(3))
-                # Parse current thermal limit if present: e.g. "... | 87C current"
-                mc = re.search(r"\|\s*(\d+)\s*C\s*current", line)
-                if mc:
-                    limits["thermal_limit_current"] = int(mc.group(1))
+                # Architecture........: GM200:161 (dGPU)
+                if line.startswith("Architecture"):
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        arch = parts[1].strip()
+                        if arch:
+                            limits["gpu_architecture"] = arch
+                            if current_gpu_idx is not None:
+                                self.gpu_arches[current_gpu_idx] = arch
 
-            # Overvolt P0.........: 0 mV (range: -1018.461 mV - 256.019 mV)
-            elif line.startswith("Overvolt"):
-                m = re.search(
-                    r"^Overvolt\s+(P\d+).*?:\s*([+-]?\d+(?:\.\d+)?)\s*([mu\u00b5\u03bc]V)\s*\(\s*range\s*:\s*([+-]?\d+(?:\.\d+)?)\s*([mu\u00b5\u03bc]V)\s*-\s*([+-]?\d+(?:\.\d+)?)\s*([mu\u00b5\u03bc]V)\s*\)",
-                    line,
-                    re.IGNORECASE,
-                )
-                if m:
-                    pstate = m.group(1).upper()
-                    current_mv = self._voltage_text_to_mv(m.group(2), m.group(3))
-                    min_mv = self._voltage_text_to_mv(m.group(4), m.group(5))
-                    max_mv = self._voltage_text_to_mv(m.group(6), m.group(7))
-                    # Prefer P0 when multiple Overvolt rows exist.
-                    if limits.get("legacy_overvolt_pstate") == "P0" and pstate != "P0":
-                        continue
-                    limits["legacy_overvolt_pstate"] = pstate
-                    limits["legacy_overvolt_current_mv"] = current_mv
-                    limits["legacy_overvolt_min_mv"] = min_mv
-                    limits["legacy_overvolt_max_mv"] = max_mv
+                # VFP (Graphics)......: -500 MHz ~ 500 MHz
+                elif line.startswith("VFP (Graphics)"):
+                    m = re.search(r"(-?\d+)\s*MHz\s*~\s*(-?\d+)\s*MHz", line)
+                    if m:
+                        limits["core_clock_min"] = int(m.group(1))
+                        limits["core_clock_max"] = int(m.group(2))
+
+                # VFP (Memory)........: -500 MHz ~ 1500 MHz
+                elif line.startswith("VFP (Memory)"):
+                    m = re.search(r"(-?\d+)\s*MHz\s*~\s*(-?\d+)\s*MHz", line)
+                    if m:
+                        limits["mem_clock_min"] = int(m.group(1))
+                        limits["mem_clock_max"] = int(m.group(2))
+
+                # Power Limit.........: 58% ~ 124% (100% default) | 100W min / 211W current / 212W max
+                elif line.startswith("Power Limit"):
+                    m = re.search(
+                        r"(\d+)%\s*~\s*(\d+)%\s*\((\d+)%\s*default\)", line
+                    )
+                    if m:
+                        limits["power_limit_min"] = int(m.group(1))
+                        limits["power_limit_max"] = int(m.group(2))
+                        limits["power_limit_default"] = int(m.group(3))
+                    mc = re.search(r"\|\s*(\d+)%\s*current", line)
+                    if mc:
+                        limits["power_limit_current"] = int(mc.group(1))
+                    mw = re.search(
+                        r"(\d+)W\s*min\s*/\s*(\d+)W\s*current\s*/\s*(\d+)W\s*max",
+                        line,
+                    )
+                    if mw:
+                        limits["power_watt_min"] = int(mw.group(1))
+                        limits["power_watt_current"] = int(mw.group(2))
+                        limits["power_watt_max"] = int(mw.group(3))
+
+                # Thermal Limit.......: 65C ~ 90C (83C default)
+                elif line.startswith("Thermal Limit"):
+                    m = re.search(
+                        r"(\d+)\s*C\s*~\s*(\d+)\s*C\s*\((\d+)\s*C\s*default\)",
+                        line,
+                    )
+                    if m:
+                        limits["thermal_limit_min"] = int(m.group(1))
+                        limits["thermal_limit_max"] = int(m.group(2))
+                        limits["thermal_limit_default"] = int(m.group(3))
+                    mc = re.search(r"\|\s*(\d+)\s*C\s*current", line)
+                    if mc:
+                        limits["thermal_limit_current"] = int(mc.group(1))
+
+                # Overvolt P0.........: 0 mV (range: -1018.461 mV - 256.019 mV)
+                elif line.startswith("Overvolt"):
+                    m = re.search(
+                        r"^Overvolt\s+(P\d+).*?:\s*([+-]?\d+(?:\.\d+)?)\s*([mu\u00b5\u03bc]V)\s*\(\s*range\s*:\s*([+-]?\d+(?:\.\d+)?)\s*([mu\u00b5\u03bc]V)\s*-\s*([+-]?\d+(?:\.\d+)?)\s*([mu\u00b5\u03bc]V)\s*\)",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    if m:
+                        pstate = m.group(1).upper()
+                        current_mv = self._voltage_text_to_mv(m.group(2), m.group(3))
+                        min_mv = self._voltage_text_to_mv(m.group(4), m.group(5))
+                        max_mv = self._voltage_text_to_mv(m.group(6), m.group(7))
+                        if (
+                            limits.get("legacy_overvolt_pstate") == "P0"
+                            and pstate != "P0"
+                        ):
+                            continue
+                        limits["legacy_overvolt_pstate"] = pstate
+                        limits["legacy_overvolt_current_mv"] = current_mv
+                        limits["legacy_overvolt_min_mv"] = min_mv
+                        limits["legacy_overvolt_max_mv"] = max_mv
 
         if limits:
             self.console.append(f"[GUI] GPU limits: {limits}\n")
@@ -703,12 +783,42 @@ class App(ctk.CTk):
         return int(round(value))
 
     @staticmethod
+    def _native_query_payload(output: str) -> Optional[Dict[str, Any]]:
+        """Extract the JSON body emitted by NativeBackend query helpers."""
+        text = output.strip()
+        start = text.find("{")
+        if start < 0:
+            return None
+        try:
+            payload = json.loads(text[start:])
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
     def _parse_status_current_values(
         output: str,
     ) -> Tuple[Optional[float], Dict[str, Any]]:
         """Extract lock voltage and current OC/limit values from CLI 'status' output."""
         locked_voltage_mv = None  # type: Optional[float]
         limits_update = {}  # type: Dict[str, Any]
+
+        native_payload = App._native_query_payload(output)
+        if native_payload is not None:
+            lock_value = native_payload.get("vfp_lock_mv")
+            if isinstance(lock_value, (int, float)):
+                locked_voltage_mv = float(lock_value)
+            for key in (
+                "core_clock_current",
+                "mem_clock_current",
+                "power_limit_current",
+                "thermal_limit_current",
+                "voltage_boost_current",
+            ):
+                value = native_payload.get(key)
+                if isinstance(value, (int, float)):
+                    limits_update[key] = int(value)
+            return locked_voltage_mv, limits_update
 
         for line in output.splitlines():
             line_s = line.strip()
@@ -826,6 +936,30 @@ class App(ctk.CTk):
             merged["supported_pstates"] = []
             self._gpu_limits_cache = merged
             self._sync_dashboard_lock_state_from_cache(merged)
+            if self.tab_overclock:
+                self.tab_overclock.update_limits(merged)
+            if self.tab_vfcurve:
+                self.tab_vfcurve.sync_freq_locks_from_cache(merged)
+            return
+
+        native_payload = self._native_query_payload(output)
+        if native_payload is not None:
+            merged.update(native_payload)
+            pstates = native_payload.get("supported_pstates", [])
+            self._gpu_pstates_cache = (
+                [str(pstate) for pstate in pstates] if isinstance(pstates, list) else []
+            )
+            merged["supported_pstates"] = self._gpu_pstates_cache
+            self._gpu_limits_cache = merged
+            self._sync_dashboard_lock_state_from_cache(merged)
+            if self._gpu_pstates_cache:
+                self.console.append(
+                    f"[GUI] Supported P-States: {', '.join(self._gpu_pstates_cache)}\n"
+                )
+            else:
+                self.console.append(
+                    "[GUI] Warning: native settings returned no supported P-States.\n"
+                )
             if self.tab_overclock:
                 self.tab_overclock.update_limits(merged)
             if self.tab_vfcurve:
@@ -1093,8 +1227,8 @@ class App(ctk.CTk):
             self._apply_vfp_offset_state(*self._vfp_offset_state_cache)
             return
 
-        gpu_args = self.get_gpu_args()
-        if not gpu_args or not self.runner.exe_path:
+        gpu = self.selected_gpu_target()
+        if gpu is None:
             return
 
         csv_path = self._get_vfp_cache_path()
@@ -1103,14 +1237,27 @@ class App(ctk.CTk):
         gpu_key = self._get_vfp_offset_gpu_key()
 
         def _worker():
-            runner = CLIRunner(self.runner.exe_path, on_output=lambda _: None)
-            retcode, _output = runner.run_sync(
-                gpu_args + ["set", "vfp", "export", "-q", csv_path],
-                cwd=self.cli_cwd,
-            )
+            retcode = 0
             vfp_offset_state = None
-            if retcode == 0:
+            try:
+                points = self.backend.query_domain_vfp_points(gpu)
+                with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(
+                        ["voltage", "frequency", "delta", "default_frequency"]
+                    )
+                    for point in points:
+                        writer.writerow(
+                            [
+                                point.get("voltage_uv", 0),
+                                point.get("frequency_khz", 0),
+                                point.get("delta_khz", 0),
+                                point.get("default_frequency_khz", 0),
+                            ]
+                        )
                 vfp_offset_state = self._get_vfp_offset_state_from_csv(csv_path)
+            except Exception:
+                retcode = -1
             self.after(
                 0,
                 lambda: self._on_vfp_offset_refresh_done(
@@ -1176,11 +1323,25 @@ class App(ctk.CTk):
             return self.gpu_uuid_map.get(idx)
         return None
 
+    def selected_gpu_target(self) -> Optional[str]:
+        """Return the native pynvoc GPU target for the current selection."""
+        idx = self.get_current_gpu_index()
+        if idx is None:
+            return None
+        return self.gpu_uuid_map.get(idx) or str(idx)
+
     def show_gpu_command(self, command_args: List[str]) -> None:
-        """Run a GPU-scoped CLI command and stream it to the console."""
-        gpu_args = self.get_gpu_args()
-        if gpu_args:
-            self.run_cli_display(gpu_args + command_args)
+        """Run a GPU-scoped native query and stream it to the console."""
+        command_name = command_args[0] if command_args else ""
+        self.run_gpu_query_async(
+            command_args,
+            lambda retcode, output: self.console.append(
+                output if output.endswith("\n") else f"{output}\n"
+            )
+            if retcode == 0
+            else self.console.append(f"{output}\n"),
+            thread_name=f"show-{command_name or 'query'}",
+        )
 
     def run_gpu_query_async(
         self,
@@ -1188,18 +1349,81 @@ class App(ctk.CTk):
         callback: Callable[[int, str], None],
         thread_name: str = "gpu-query",
     ) -> bool:
-        """Run a GPU-scoped CLI query asynchronously and return whether it started."""
-        gpu_args = self.get_gpu_args()
-        if not gpu_args:
+        """Run a GPU-scoped native query asynchronously and return whether it started."""
+        gpu = self.selected_gpu_target()
+        if gpu is None:
+            return False
+        command_name = command_args[0] if command_args else ""
+        if command_name not in {"info", "status", "get"}:
+            callback(-1, f"Unsupported native query: {command_name}")
             return False
 
         def _worker():
-            runner = CLIRunner(self.runner.exe_path, on_output=lambda _: None)
-            retcode, output = runner.run_sync(gpu_args + command_args, cwd=self.cli_cwd)
+            retcode, output, _parsed = self.backend.run_query(gpu, command_name)
             self.after(0, lambda: callback(retcode, output))
 
         threading.Thread(target=_worker, daemon=True, name=thread_name).start()
         return True
+
+    def _on_native_output(self, text: str, _level: str = "info") -> None:
+        self.after(0, lambda: self.console.append(text))
+
+    def run_native_action(
+        self,
+        description: str,
+        action: Callable[[Any], Optional[str]],
+        on_finished: Optional[Callable[[int], None]] = None,
+    ) -> None:
+        if self.selected_gpu_target() is None:
+            self.console.append("[GUI] No GPU selected.\n")
+            return
+        started = self.backend.run_action(
+            description,
+            action,
+            self._on_native_output,
+            lambda code: self.after(
+                0, lambda: self._after_native_action(code, on_finished)
+            ),
+        )
+        if not started:
+            self.console.append("[GUI] Another native action is already running.\n")
+
+    def run_native_action_chain(
+        self, commands: List[Tuple[str, Callable[[Any], Optional[str]]]]
+    ) -> None:
+        queue = list(commands)
+
+        def start_next(_code: int = 0) -> None:
+            if not queue:
+                self.refresh_after_native_action()
+                return
+            description, action = queue.pop(0)
+            started = self.backend.run_action(
+                description,
+                action,
+                self._on_native_output,
+                lambda code: self.after(0, lambda: start_next(code)),
+            )
+            if not started:
+                self.console.append("[GUI] Another native action is already running.\n")
+
+        start_next()
+
+    def _after_native_action(
+        self, code: int, on_finished: Optional[Callable[[int], None]] = None
+    ) -> None:
+        if on_finished is not None:
+            on_finished(code)
+        if code == 0:
+            self.refresh_after_native_action()
+
+    def refresh_after_native_action(self) -> None:
+        self._query_gpu_get()
+        self._query_overclock_status()
+        if self.tab_dashboard:
+            self.tab_dashboard._fetch_once()
+        if self.tab_vfcurve:
+            self.tab_vfcurve._refresh_curve()
 
     def run_cli_display(
         self, args: List[str], on_finished: Optional[Callable[[int], None]] = None

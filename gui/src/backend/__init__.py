@@ -2,5 +2,6 @@
 
 from src.backend.base import FanSettings
 from src.backend.cli import CliBackend
+from src.backend.native import NativeBackend
 
-__all__ = ["CliBackend", "FanSettings"]
+__all__ = ["CliBackend", "FanSettings", "NativeBackend"]

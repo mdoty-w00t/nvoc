@@ -1262,6 +1262,7 @@ dependencies = [
     { name = "numpy" },
     { name = "packaging" },
     { name = "pillow" },
+    { name = "pynvoc" },
     { name = "pyinstaller" },
     { name = "pystray" },
     { name = "six" },
@@ -1286,6 +1287,7 @@ requires-dist = [
     { name = "numpy", marker = "python_full_version >= '3.9'", specifier = ">=2.0" },
     { name = "packaging", specifier = ">=24.0" },
     { name = "pillow", specifier = ">=10.4.0" },
+    { name = "pynvoc", editable = "nvoc-python" },
     { name = "pyinstaller", specifier = "~=6.19.0" },
     { name = "pystray", specifier = ">=0.19.5" },
     { name = "six", specifier = ">=1.17.0" },
@@ -1611,25 +1613,6 @@ dependencies = [
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c7/fe/9278c29394bf69169febc21f96b4252c3ee7c8ec22c2fc545004bed47e71/pyinstaller_hooks_contrib-2026.4.tar.gz", hash = "sha256:766c281acb1ecc32e21c8c667056d7ebf5da0aabd5e30c219f9c2a283620eeaa", size = 173050, upload-time = "2026-03-31T14:10:51.188Z" }
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/88/f4/035fb8c06deff827f540a9a4ed9122c54e5376fca3e42eddf0c263730775/pyinstaller_hooks_contrib-2026.4-py3-none-any.whl", hash = "sha256:1de1a5e49a878122010b88c7e295502bc69776c157c4a4dc78741a4e6178b00f", size = 455496, upload-time = "2026-03-31T14:10:49.867Z" },
-]
-
-[[package]]
-name = "pynvoc"
-version = "0.1.0"
-source = { editable = "nvoc-python" }
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.3.0" },
-    { name = "ruff", specifier = ">=0.11.0" },
 ]
 
 [[package]]
