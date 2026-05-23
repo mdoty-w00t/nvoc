@@ -1091,8 +1091,7 @@ pub fn run_stress_mixed<B: Backend>(
         let elapsed_total = start.elapsed().as_secs_f64();
 
         println!(
-            "[{}] t={:6.1}s/{:.0}s | {:10} | p={:11} | size={:5} | inst={:7.2} TFLOPS(eqv)",
-            "MIX",
+            "[CUDA] t={:6.1}s/{:.0}s | {:10} | p={:8} | size={:5} | inst={:7.2} TFLOPS(eqv)",
             elapsed_total,
             effective_config.duration_s,
             kernel_kind.as_str(),
