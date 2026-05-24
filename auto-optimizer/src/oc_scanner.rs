@@ -1356,13 +1356,18 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
     let mut init_vmem_oc_value = 0;
 
     for gpu in gpus {
-        set_nvapi_pstate_clock_offsets(
-            gpu,
-            [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
-        )?;
-
         let info = run_output(gpu, QueryGpuInfo)?;
         let gpu_type = fetch_gpu_type(&info);
+
+        // 50-series (Blackwell) does not support NvAPI_GPU_SetPstates20 for
+        // clock offsets; skip the memory-offset zeroing init for these GPUs.
+        let is_50_series_gpu = gpu_type.as_ref().map(|t| t.is_maxq()).unwrap_or(false);
+        if !is_50_series_gpu {
+            set_nvapi_pstate_clock_offsets(
+                gpu,
+                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
+            )?;
+        }
 
         run_output(
             gpu,
@@ -1607,14 +1612,16 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
                 }
             }
 
-            set_nvapi_pstate_clock_offsets(
-                gpu,
-                [(
-                    PState::P0,
-                    ClockDomain::Memory,
-                    KilohertzDelta(init_vmem_oc_value),
-                )],
-            )?;
+            if !is_50_series {
+                set_nvapi_pstate_clock_offsets(
+                    gpu,
+                    [(
+                        PState::P0,
+                        ClockDomain::Memory,
+                        KilohertzDelta(init_vmem_oc_value),
+                    )],
+                )?;
+            }
 
             apply_arch_safety_policy(
                 ArchSafetyPolicyPhase::PrePointTest,
@@ -1720,7 +1727,7 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
 
         //memory oc
         let vmem_scan_switch = matches.get_flag("Vmem_scan_switch");
-        if vmem_scan_switch {
+        if vmem_scan_switch && !is_50_series {
             set_nvapi_pstate_clock_offsets(
                 gpu,
                 [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
