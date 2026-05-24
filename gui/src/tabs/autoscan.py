@@ -303,6 +303,9 @@ class AutoscanTab:
     def _stop_scan(self) -> None:
         self.app.cancel_cli()
         self._set_scan_buttons(start_enabled=True, stop_enabled=False)
+        # Release any voltage lock the scan left active so a restart can succeed.
+        gpu_args = self.app.get_gpu_args()
+        self.app.run_cli_display(gpu_args + ["set", "nvapi", "--reset-volt-locks"])
 
     def _fix_result(self) -> None:
         gpu_args = self.app.get_gpu_args()
