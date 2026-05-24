@@ -2,6 +2,8 @@
 Output Console Widget - A read-only scrollable text area for CLI output.
 """
 
+import io
+import os
 import threading
 
 import customtkinter as ctk
@@ -16,6 +18,7 @@ class OutputConsole(ctk.CTkFrame):
         super().__init__(master, **kwargs)
         self._expanded = False
         self._lock = threading.Lock()
+        self._log_file: io.TextIOWrapper | None = None
 
         # Header stays visible; clicking it toggles the console body.
         self.header = ctk.CTkFrame(
@@ -60,8 +63,20 @@ class OutputConsole(ctk.CTkFrame):
         else:
             self.textbox.pack_forget()
 
+    def set_log_file(self, path: str) -> None:
+        """Open (or reopen) a file that mirrors every append() call."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if self._log_file:
+            self._log_file.close()
+        self._log_file = open(path, "a", encoding="utf-8", buffering=1)
+
     def append(self, text: str) -> None:
         """Append text to the console (thread-safe) and keep only the last 1000 lines."""
+        if self._log_file:
+            try:
+                self._log_file.write(text)
+            except OSError:
+                pass
         with self._lock:
             self.textbox.configure(state="normal")
 

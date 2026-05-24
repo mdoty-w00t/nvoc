@@ -6,6 +6,7 @@ import csv
 import customtkinter as ctk
 import ctypes
 import os
+import pwd
 import re
 import sys
 import threading
@@ -28,6 +29,22 @@ import shutil
 
 if TYPE_CHECKING:
     from src.single_instance import SingleInstanceGuard
+
+
+def _invoking_user_home() -> str:
+    """Return the home directory of the user who actually launched the process.
+
+    When the GUI is started with `sudo nvoc-gui`, os.path.expanduser("~")
+    returns /root because sudo resets HOME.  SUDO_USER holds the original
+    username, so we use that to get the real home directory instead.
+    """
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            return pwd.getpwnam(sudo_user).pw_dir
+        except KeyError:
+            pass
+    return os.path.expanduser("~")
 
 
 def find_cli_exe() -> str:
@@ -91,12 +108,16 @@ class App(ctk.CTk):
                 candidate = os.path.dirname(candidate)
             system_prefixes = ("/usr", "/usr/local", "/opt")
             if any(os.path.abspath(candidate).startswith(p) for p in system_prefixes):
-                candidate = os.path.expanduser("~")
+                candidate = _invoking_user_home()
             self.cli_cwd = candidate
         else:
             self.cli_cwd = None
 
         self._build_ui()
+
+        # Mirror all console output to a log file in the workspace directory.
+        log_base = self.cli_cwd if self.cli_cwd else _invoking_user_home()
+        self.console.set_log_file(os.path.join(log_base, "ws", "nvoc-gui.log"))
 
         # Setup CLI runner (after console is created)
         self.runner = CLIRunner(exe_path, on_output=self._on_cli_output)
@@ -331,7 +352,7 @@ class App(ctk.CTk):
                 candidate = os.path.dirname(candidate)
             system_prefixes = ("/usr", "/usr/local", "/opt")
             if any(os.path.abspath(candidate).startswith(p) for p in system_prefixes):
-                candidate = os.path.expanduser("~")
+                candidate = _invoking_user_home()
             self.cli_cwd = candidate
             self._update_exe_label()
             self.console.append(f"[GUI] CLI path set to: {path}\n")
