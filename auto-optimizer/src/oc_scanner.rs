@@ -1394,11 +1394,32 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
         // Verify GPU is at its natural idle operating point before we modify any state.
         // This must run before the VFP delta and voltage lock, which change the GPU's
         // active voltage and would cause the check to fail on all architectures.
+        // Retry up to 5 times with 3 s gaps — the GPU may take a moment to settle after
+        // a VFP reset, especially on Blackwell.
         println!("Waiting for default volt-freq self-check");
-        let checks =
-            voltage_frequency_check(std::slice::from_ref(gpu), lower_voltage_point, print_scan_separator)
-                .expect("Failed to read v-f info");
-        if !checks.iter().all(|check| check.precise) {
+        let mut check_passed = false;
+        for attempt in 1..=5 {
+            let checks =
+                voltage_frequency_check(std::slice::from_ref(gpu), lower_voltage_point, print_scan_separator)
+                    .expect("Failed to read v-f info");
+            if checks.iter().all(|check| check.precise) {
+                check_passed = true;
+                break;
+            }
+            let summary = checks
+                .iter()
+                .map(|check| format!("GPU {} precise={}", check.gpu_id, check.precise))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "default V/F self-check attempt {attempt}/5 not yet precise ({summary}), retrying in 3 s..."
+            );
+            sleep(Duration::from_secs(3));
+        }
+        if !check_passed {
+            let checks =
+                voltage_frequency_check(std::slice::from_ref(gpu), lower_voltage_point, print_scan_separator)
+                    .expect("Failed to read v-f info");
             let summary = checks
                 .iter()
                 .map(|check| format!("GPU {} precise={}", check.gpu_id, check.precise))
