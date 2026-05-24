@@ -560,8 +560,8 @@ class VFCurveTab:
     # ────────────────────────────────────────────
     def _get_csv_path(self) -> str:
         """Return the CSV cache path for the current GPU (by UUID)."""
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        cache_dir = os.path.join(app_dir, self._EXPORT_DIR)
+        cache_base = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+        cache_dir = os.path.join(cache_base, "nvoc", "gui", self._EXPORT_DIR)
         os.makedirs(cache_dir, exist_ok=True)
 
         uuid = self.app.get_current_gpu_uuid()

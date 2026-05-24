@@ -1004,8 +1004,8 @@ class App(ctk.CTk):
 
     def _get_vfp_cache_path(self) -> str:
         """Return the VFP CSV cache path for the current GPU."""
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        cache_dir = os.path.join(app_dir, VFCurveTab._EXPORT_DIR)
+        cache_base = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+        cache_dir = os.path.join(cache_base, "nvoc", "gui", VFCurveTab._EXPORT_DIR)
         os.makedirs(cache_dir, exist_ok=True)
 
         uuid = self.get_current_gpu_uuid()
