@@ -76,17 +76,11 @@ fn spawn_dynamic_load_process() -> Result<Child, Error> {
     panic_windows_only("dynamic VFP export")
 }
 
-/// Reject paths that could escape the working directory when running as admin/root.
-/// Rejects absolute paths (including UNC `\\server\share`) and `..` components.
+/// Reject paths containing `..` that could escape the working directory.
+/// Absolute paths are allowed — the user explicitly supplies them and they carry no traversal risk.
 fn reject_dotdot(path: &str) -> Result<(), Error> {
     use std::path::Component;
     let p = Path::new(path);
-    if p.is_absolute() {
-        return Err(Error::Custom(format!(
-            "path '{}' must be relative; absolute and UNC paths are not allowed",
-            path
-        )));
-    }
     if p.components().any(|c| c == Component::ParentDir) {
         return Err(Error::Custom(format!(
             "path '{}' contains '..'; refusing to write outside working directory",

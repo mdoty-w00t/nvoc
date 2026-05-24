@@ -373,6 +373,9 @@ mod pressure_runner {
                             .unwrap_or_else(|err| {
                                 eprintln!("Warning: Failed to reset GPU due to {:?}", err);
                             });
+                            // Return 2 to distinguish "stressor timed out (clock too low)"
+                            // from "stressor crashed (clock too high, code 1)".
+                            exit_code = 2;
                             break;
                         }
                     }
@@ -1072,6 +1075,17 @@ fn run_gpuboostv3_long_phase<V: std::fmt::Display + Copy>(
             args.common.cuda_device,
             args.common.stressor_extra_args,
         );
+        if long_duration_flag >= 2 {
+            // Stressor timed out — clock is too low for the computation to finish.
+            // Going lower would only make this worse. Accept the current delta as the floor.
+            writeln!(l, "Test result is code #{} .", long_duration_flag)?;
+            println!(
+                "Long Test #{} TIMED OUT on point: #{} — accepting current delta as floor.",
+                *test_code, point
+            );
+            break;
+        }
+
         if long_duration_flag != 0 {
             run_output(
                 gpu,
