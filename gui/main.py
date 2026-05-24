@@ -22,7 +22,11 @@ if sys.platform == "win32":
         except Exception:
             pass
 
+import customtkinter as ctk
+
 from src.app import App
+
+ctk.set_widget_scaling(2.0)
 
 
 def main() -> int:

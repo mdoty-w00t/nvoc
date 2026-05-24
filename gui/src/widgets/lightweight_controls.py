@@ -291,7 +291,7 @@ class SegmentRangeSelector(ctk.CTkFrame):
             self,
             text="No P-State data",
             anchor="w",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 20),
             text_color="#7e8da1",
         )
         self._summary.grid(row=1, column=0, sticky="ew", pady=(0, 2))
@@ -453,7 +453,7 @@ class SegmentRangeSelector(ctk.CTkFrame):
                 h / 2 - 6,
                 text="No supported P-States",
                 fill="#7e8da1",
-                font=("Segoe UI", 10),
+                font=("Segoe UI", 20),
             )
             return
 
@@ -513,7 +513,7 @@ class SegmentRangeSelector(ctk.CTkFrame):
                 self._line_y + 20,
                 text=label,
                 fill=label_fill,
-                font=("Segoe UI", 10, "bold"),
+                font=("Segoe UI", 20, "bold"),
             )
 
 
@@ -670,7 +670,7 @@ class LiteButton(ctk.CTkFrame):
             h / 2,
             text=self._text,
             fill=text_color,
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 20, "bold"),
         )
 
 
@@ -684,7 +684,7 @@ class LiteEntry(ctk.CTkFrame):
         width: int = 12,
         justify: str = "left",
         height: int = 32,
-        font: Tuple[str, int, str] = ("Segoe UI", 12, "bold"),
+        font: Tuple[str, int, str] = ("Segoe UI", 24, "bold"),
         min_px: int = 48,
     ):
         self._char_width = max(4, int(width))

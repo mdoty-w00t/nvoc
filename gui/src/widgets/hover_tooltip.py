@@ -78,7 +78,7 @@ class HoverTooltip:
             relief="solid",
             borderwidth=1,
             wraplength=self.wraplength,
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 18),
         )
         label.pack()
 
