@@ -3,6 +3,7 @@ Autoscan Tab - VFP auto-scanning workflow.
 """
 
 import os
+import threading
 
 import customtkinter as ctk
 from tkinter import filedialog
@@ -302,10 +303,26 @@ class AutoscanTab:
 
     def _stop_scan(self) -> None:
         self.app.cancel_cli()
-        self._set_scan_buttons(start_enabled=True, stop_enabled=False)
-        # Release any voltage lock the scan left active so a restart can succeed.
+        # Keep Start disabled until the volt-lock reset actually finishes.
+        self._set_scan_buttons(start_enabled=False, stop_enabled=False)
         gpu_args = self.app.get_gpu_args()
-        self.app.run_cli_display(gpu_args + ["set", "nvapi", "--reset-volt-locks"])
+
+        def _do_reset() -> None:
+            runner = self.app.runner
+            # Wait for the cancelled scan thread to fully exit before reusing runner.
+            thread = runner._thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=5.0)
+            retcode, output = runner.run_sync(
+                gpu_args + ["set", "nvapi", "--reset-volt-locks"]
+            )
+            if output.strip():
+                self.frame.after(0, lambda: self.app.console.append(output))
+            self.frame.after(
+                0, lambda: self._set_scan_buttons(start_enabled=True, stop_enabled=False)
+            )
+
+        threading.Thread(target=_do_reset, daemon=True).start()
 
     def _fix_result(self) -> None:
         gpu_args = self.app.get_gpu_args()

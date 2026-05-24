@@ -90,7 +90,7 @@ class CLIRunner:
                     self.on_output("[GUI] Process cancelled.\n")
                 else:
                     self.on_output(f"[GUI] Process exited with code {retcode}\n")
-                if on_finished:
+                if on_finished and not self._cancelled:
                     on_finished(retcode)
             except FileNotFoundError:
                 self.on_output(
