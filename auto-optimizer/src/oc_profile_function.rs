@@ -942,17 +942,27 @@ pub fn break_point_continue(
             break;
         }
 
-        if line.contains("Scan")
-            || line.contains("Finished")
-                && (last_voltage_point.is_some()
-                    || last_code_100_freq.is_some()
-                    || last_code_0_freq.is_some())
-        {
-            if line.contains("ultrafast") {
-                ultrafast_flag = Some(true)
-            } else if line.contains("normal") {
-                ultrafast_flag = Some(false)
+        if line.contains("Scan") {
+            if ultrafast_flag.is_none() {
+                if line.contains("ultrafast") {
+                    ultrafast_flag = Some(true);
+                } else if line.contains("normal") {
+                    ultrafast_flag = Some(false);
+                }
             }
+            // Keep reading through prior sessions until we find a code-0 success.
+            // A single-session BSOD may have no success result; the last success
+            // could be in an earlier appended session.
+            if last_code_100_freq.is_some() {
+                break;
+            }
+            continue;
+        }
+        if line.contains("Finished")
+            && (last_voltage_point.is_some()
+                || last_code_100_freq.is_some()
+                || last_code_0_freq.is_some())
+        {
             break;
         }
 

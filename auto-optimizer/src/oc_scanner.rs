@@ -1525,7 +1525,9 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
 
         init_core_oc_value = last_succeeded_freq;
         core_oc_safe_limit = last_failed_freq;
-        if core_oc_safe_limit < init_core_oc_value {
+        // Guard only applies to positive-OC: for negative deltas (underclocking the
+        // factory curve), safe_limit legitimately sits below init_core_oc_value.
+        if core_oc_safe_limit < init_core_oc_value && init_core_oc_value >= 0 {
             println!("log parsing error... Restoring default value");
             core_oc_safe_limit = core_oc_safe_limit_ref;
             init_core_oc_value -= safe_elasticity_per_cycle;
