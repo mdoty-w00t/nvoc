@@ -140,6 +140,18 @@ class AutoscanTab:
             width=150,
         ).grid(row=row, column=1, sticky="w", padx=5, pady=3)
 
+        row += 1
+        # Memory scan
+        ctk.CTkLabel(params_grid, text="Memory OC:").grid(
+            row=row, column=0, sticky="w", padx=5, pady=3
+        )
+        self.mem_scan_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            params_grid,
+            text="Scan memory overclock (-m)",
+            variable=self.mem_scan_var,
+        ).grid(row=row, column=1, sticky="w", padx=5, pady=3)
+
         # === Action Buttons ===
         btn_frame = ctk.CTkFrame(scroll)
         btn_frame.pack(fill="x", pady=(0, 10))
@@ -271,6 +283,8 @@ class AutoscanTab:
             bsod = self.bsod_var.get()
             if bsod != "(auto)":
                 args += ["-b", bsod]
+            if self.mem_scan_var.get():
+                args.append("-m")
 
         self._set_scan_buttons(start_enabled=False, stop_enabled=True)
 
