@@ -1,0 +1,64 @@
+#!/sbin/openrc-run
+
+description="NVOC VFP import/reset service"
+
+# Loaded from /etc/conf.d/nvoc-vfp — space-separated GPU_ID:CSV_PATH pairs.
+NVOC_GPU_CONFIGS="${NVOC_GPU_CONFIGS:-}"
+
+depend() {
+	need udev-settle
+	after udev-settle
+}
+
+start() {
+	ebegin "Waiting for /dev/nvidiactl"
+	local i
+	for i in $(seq 1 30); do
+		[ -e /dev/nvidiactl ] && break
+		sleep 1
+	done
+	if [ ! -e /dev/nvidiactl ]; then
+		eerror "/dev/nvidiactl did not appear in time"
+		eend 1
+		return 1
+	fi
+	eend 0
+
+	if [ -z "${NVOC_GPU_CONFIGS}" ]; then
+		ewarn "NVOC_GPU_CONFIGS is empty — nothing to import"
+		ewarn "Set it in /etc/conf.d/nvoc-vfp as GPU_ID:CSV_PATH pairs"
+		return 0
+	fi
+
+	local failed=0
+	for gpu_config in ${NVOC_GPU_CONFIGS}; do
+		local gpu_id="${gpu_config%%:*}"
+		local csv="${gpu_config#*:}"
+
+		if [ ! -f "${csv}" ]; then
+			ewarn "GPU ${gpu_id}: no CSV at ${csv} — skipping"
+			continue
+		fi
+
+		ebegin "GPU ${gpu_id}: importing VFP curve from ${csv}"
+		/usr/bin/nvoc-auto-optimizer --gpu "${gpu_id}" set vfp import "${csv}"
+		if ! eend $?; then
+			failed=1
+		fi
+	done
+
+	return ${failed}
+}
+
+stop() {
+	local failed=0
+	for gpu_config in ${NVOC_GPU_CONFIGS}; do
+		local gpu_id="${gpu_config%%:*}"
+		ebegin "GPU ${gpu_id}: resetting VFP curve"
+		/usr/bin/nvoc-auto-optimizer --gpu "${gpu_id}" reset --domain vfp
+		if ! eend $?; then
+			failed=1
+		fi
+	done
+	return ${failed}
+}

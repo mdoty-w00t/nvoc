@@ -1,0 +1,8 @@
+# /etc/conf.d/nvoc-vfp
+#
+# Space-separated list of GPU_ID:CSV_PATH pairs.
+# GPU IDs are the hex IDs shown by: nvoc-auto-optimizer info
+# One entry per GPU; omit a GPU to leave its curve unchanged at boot.
+#
+# Example for two RTX 5060 Ti:
+NVOC_GPU_CONFIGS="0x0A00:/etc/nvoc/vfp-0x0A00.csv 0x0B00:/etc/nvoc/vfp-0x0B00.csv"
