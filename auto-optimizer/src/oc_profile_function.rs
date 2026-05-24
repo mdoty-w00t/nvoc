@@ -1080,68 +1080,47 @@ pub fn key_point_extractor(
     }
 
     if maxq_flag {
-        let mut prev_margin_bin = None;
-        let mut max_default_freq_diff_row = None;
-        let mut max_default_freq_load_diff_row = None;
-        let mut max_default_freq_diff = 0;
-        let mut max_default_freq_load_diff = 0;
-        let mut first_negative_margin_bin_row = None;
-        let mut max_negative_margin_row = None;
-
-        let mut records: Vec<(usize, u32, u32, i32)> = Vec::new();
+        // Find the Max-Q step boundary: the biggest jump in default_frequency between
+        // adjacent voltage points. The basic 4-column CSV (voltage, frequency, delta,
+        // default_frequency) is all that's available here.
+        let mut max_freq_step = 0_u32;
+        let mut step_row = None;
+        let mut prev_freq: Option<u32> = None;
+        let mut prev_idx = 0_usize;
 
         for (idx, result) in rdr.records().enumerate() {
             let record = result.map_err(csv_error)?;
             let voltage: i32 = record[0].parse()?;
             let default_freq: u32 = record[3].parse()?;
-            let default_freq_load: u32 = record[4].parse()?;
-            let margin_bin: i32 = record[6].parse()?;
 
             if voltage > 680000 {
-                records.push((idx, default_freq, default_freq_load, margin_bin));
-            }
-
-            if let Some(prev) = prev_margin_bin {
-                if prev == 0 && margin_bin < 0 && first_negative_margin_bin_row.is_none() {
-                    first_negative_margin_bin_row = Some(idx - 1);
+                if let Some(prev) = prev_freq {
+                    let step = default_freq.saturating_sub(prev);
+                    if step > max_freq_step {
+                        max_freq_step = step;
+                        step_row = Some(prev_idx); // row just before the jump
+                    }
                 }
-                if margin_bin < prev {
-                    max_negative_margin_row = Some(idx);
-                }
+                prev_idx = idx;
+                prev_freq = Some(default_freq);
             }
-            prev_margin_bin = Some(margin_bin);
         }
 
-        if records.is_empty() {
+        if prev_freq.is_none() {
             return Err(Error::Custom(
-                "key_point_extractor: no records in VFP CSV".into(),
+                "key_point_extractor: no records above 680mV in VFP CSV".into(),
             ));
         }
 
-        for i in 0..records.len() - 1 {
-            let (row, default_freq, default_freq_load, _) = records[i];
-            let (_, next_default_freq, next_default_freq_load, _) = records[i + 1];
-            let default_freq_diff = next_default_freq - default_freq;
-            let default_freq_load_diff = next_default_freq_load - default_freq_load;
-
-            if default_freq_diff > max_default_freq_diff {
-                max_default_freq_diff = default_freq_diff;
-                max_default_freq_diff_row = Some(row);
-            }
-            if default_freq_load_diff > max_default_freq_load_diff {
-                max_default_freq_load_diff = default_freq_load_diff;
-                max_default_freq_load_diff_row = Some(row);
-            }
-        }
-
-        let mut values = [
-            max_default_freq_diff_row.unwrap_or(0),
-            max_default_freq_load_diff_row.unwrap_or(0),
-            first_negative_margin_bin_row.unwrap_or(0),
-            max_negative_margin_row.unwrap_or(0),
-        ];
-        values.sort_unstable(); // Sort the array in ascending order
-        Ok((values[0], values[1], values[2], values[3])) // Return values in sorted order
+        // p1: sample below the step; p2: right at the step boundary;
+        // p3: midpoint of the upper region for the high-voltage characterization.
+        let step = step_row.unwrap_or((point_l + point_u) / 2);
+        let p1 = step.saturating_sub(4).max(point_l);
+        let p2 = step.min(point_u);
+        let p3 = ((step + point_u) / 2).min(point_u);
+        let mut values = [p1, p2, p3, 0_usize];
+        values.sort_unstable_by_key(|&x| if x == 0 { usize::MAX } else { x });
+        Ok((values[0], values[1], values[2], values[3]))
     } else {
         Ok((
             point_l,
