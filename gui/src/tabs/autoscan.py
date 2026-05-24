@@ -212,9 +212,14 @@ class AutoscanTab:
     def _export_init(self) -> None:
         gpu_args = self.app.get_gpu_args()
         self.app.console.append("[GUI] Resetting core offset/curve...\n")
-        self.app.run_cli_display(gpu_args + ["set", "nvml", "--core-offset", "0"])
-        # Chain: after OC reset, export
-        self.app.run_cli_display(gpu_args + ["set", "vfp", "export", "-q", "-"])
+
+        def do_export(_retcode: int) -> None:
+            self.app.run_cli_display(gpu_args + ["set", "vfp", "export", "-q", "-"])
+
+        self.app.run_cli_display(
+            gpu_args + ["set", "nvml", "--core-offset", "0"],
+            on_finished=do_export,
+        )
 
     def _reset_unlock(self) -> None:
         """Reset VF curve explicitly and unlock NVAPI VFP states, then auto refresh."""

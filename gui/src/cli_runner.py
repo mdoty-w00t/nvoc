@@ -65,8 +65,9 @@ class CLIRunner:
         def _worker() -> None:
             cmd = [self.exe_path] + args
             self.on_output(f"[GUI] > {' '.join(cmd)}\n")
+            on_finished = self.on_finished
             try:
-                self._process = subprocess.Popen(
+                proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -77,29 +78,30 @@ class CLIRunner:
                     bufsize=1,
                     **self._no_window_kwargs(),
                 )
-                if self._process.stdout is not None:
-                    for line in iter(self._process.stdout.readline, ""):
+                self._process = proc
+                if proc.stdout is not None:
+                    for line in iter(proc.stdout.readline, ""):
                         if self._cancelled:
                             break
                         self.on_output(line)
-                    self._process.stdout.close()
-                retcode = self._process.wait()
+                    proc.stdout.close()
+                retcode = proc.wait()
                 if self._cancelled:
                     self.on_output("[GUI] Process cancelled.\n")
                 else:
                     self.on_output(f"[GUI] Process exited with code {retcode}\n")
-                if self.on_finished:
-                    self.on_finished(retcode)
+                if on_finished:
+                    on_finished(retcode)
             except FileNotFoundError:
                 self.on_output(
                     f"[GUI] ERROR: CLI executable not found: {self.exe_path}\n"
                 )
-                if self.on_finished:
-                    self.on_finished(-1)
+                if on_finished:
+                    on_finished(-1)
             except Exception as e:
                 self.on_output(f"[GUI] ERROR: {e}\n")
-                if self.on_finished:
-                    self.on_finished(-1)
+                if on_finished:
+                    on_finished(-1)
             finally:
                 self._process = None
 
