@@ -1369,6 +1369,24 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
             )?;
         }
 
+        // Verify GPU is at its natural idle operating point before we modify any state.
+        // This must run before the VFP delta and voltage lock, which change the GPU's
+        // active voltage and would cause the check to fail on all architectures.
+        println!("Waiting for default volt-freq self-check");
+        let checks =
+            voltage_frequency_check(std::slice::from_ref(gpu), lower_voltage_point, print_scan_separator)
+                .expect("Failed to read v-f info");
+        if !checks.iter().all(|check| check.precise) {
+            let summary = checks
+                .iter()
+                .map(|check| format!("GPU {} precise={}", check.gpu_id, check.precise))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::Custom(format!(
+                "default V/F self-check failed at point {lower_voltage_point}: {summary}"
+            )));
+        }
+
         run_output(
             gpu,
             SetVfpPointDelta {
@@ -1516,20 +1534,6 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
         }
 
         writeln!(l)?;
-        println!("Waiting for default volt-freq self-check");
-        let checks =
-            voltage_frequency_check(std::slice::from_ref(gpu), point, print_scan_separator)
-                .expect("Failed to read v-f info");
-        if !checks.iter().all(|check| check.precise) {
-            let summary = checks
-                .iter()
-                .map(|check| format!("GPU {} precise={}", check.gpu_id, check.precise))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(Error::Custom(format!(
-                "default V/F self-check failed at point {point}: {summary}"
-            )));
-        }
         let mut v;
         let mut default_frequency;
         let mut prev_endpoint_delta: Option<i32> = None;
