@@ -860,13 +860,6 @@ pub fn fix_result(gpu: &GpuTarget<'_>, matches: &clap::ArgMatches) -> Result<(),
 }
 
 pub fn check_voltage_points(log_filename: &str) -> io::Result<Option<VoltagePointResume>> {
-    // Helper function to extract voltage value from a log line
-    fn extract_voltage_point(line: &str) -> Option<i32> {
-        line.split_whitespace()
-            .filter_map(|word| word.parse::<i32>().ok()) // Try to parse integers
-            .next() // Take the first one found
-    }
-
     // Helper function to extract four usize values from a line
     fn extract_key_points(line: &str) -> Option<(usize, usize, usize, usize)> {
         let numbers: Vec<usize> = line
@@ -898,14 +891,12 @@ pub fn check_voltage_points(log_filename: &str) -> io::Result<Option<VoltagePoin
     for line in reader.lines() {
         let line = line?; // Unwrap line safely
 
-        // Check for minimum voltage point
-        // Minimum voltage point
         if line.contains("minimum_voltage_point") {
-            min_voltage_point = extract_voltage_point(&line);
+            min_voltage_point = extract_value(&line, "minimum_voltage_point:");
         }
 
         if line.contains("maximum_voltage_point") {
-            max_voltage_point = extract_voltage_point(&line);
+            max_voltage_point = extract_value(&line, "maximum_voltage_point:");
         }
 
         if line.contains("key points detected:") {

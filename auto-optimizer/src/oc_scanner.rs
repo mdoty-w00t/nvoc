@@ -1255,7 +1255,17 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
     let mut p4 = 0;
     let mut ultrafast_point_extraction_flag = false;
 
-    let (lower_voltage_point, upper_voltage_point) = match check_voltage_points(log_filename)? {
+    let resume_points = check_voltage_points(log_filename)?.filter(
+        |(low, up, _, _, _, _)| {
+            (0..crate::MAX_VFP_POINTS as i32).contains(low)
+                && (0..crate::MAX_VFP_POINTS as i32).contains(up)
+        },
+    );
+    if resume_points.is_none() {
+        println!("Voltage scan initialized (no valid resume data in log).");
+    }
+
+    let (lower_voltage_point, upper_voltage_point) = match resume_points {
         Some((
             read_lower_voltage_point,
             read_upper_voltage_point,

@@ -3,6 +3,9 @@
     clippy::type_complexity,
     clippy::too_many_arguments
 )]
+/// Maximum valid VFP point index (exclusive upper bound).
+pub(crate) const MAX_VFP_POINTS: usize = 256;
+
 mod arg_help;
 mod autoscan_config;
 mod basic_func;
