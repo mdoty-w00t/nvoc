@@ -21,7 +21,7 @@ pub const fn default_test_exe_path() -> &'static str {
     }
     #[cfg(not(windows))]
     {
-        "./test/test_opencl_linux.sh"
+        "/usr/lib/nvoc/test/test_cuda.sh"
     }
 }
 

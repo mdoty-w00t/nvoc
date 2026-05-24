@@ -81,15 +81,20 @@ class App(ctk.CTk):
         exe_path = saved or find_cli_exe()
         self.config.set("cli_exe_path", exe_path)
 
-        # Determine working directory for CLI (the auto-optimizer project root)
-        self.cli_cwd = (
-            os.path.dirname(os.path.dirname(exe_path))
-            if os.path.isfile(exe_path)
-            else None
-        )
-        # cli_cwd should be the project root (parent of target/release/)
-        if self.cli_cwd and os.path.basename(self.cli_cwd) == "target":
-            self.cli_cwd = os.path.dirname(self.cli_cwd)
+        # Determine working directory for CLI.
+        # Dev builds live at target/release/ — walk up two levels to the project root.
+        # System installs live at /usr/bin/ or similar — use the user's home dir so
+        # relative paths like ./ws/vfp.log land somewhere writable.
+        if os.path.isfile(exe_path):
+            candidate = os.path.dirname(os.path.dirname(exe_path))
+            if os.path.basename(candidate) == "target":
+                candidate = os.path.dirname(candidate)
+            system_prefixes = ("/usr", "/usr/local", "/opt")
+            if any(os.path.abspath(candidate).startswith(p) for p in system_prefixes):
+                candidate = os.path.expanduser("~")
+            self.cli_cwd = candidate
+        else:
+            self.cli_cwd = None
 
         self._build_ui()
 
@@ -320,10 +325,14 @@ class App(ctk.CTk):
         if path:
             self.config.set("cli_exe_path", path)
             self.runner.exe_path = path
-            # Update cwd
-            self.cli_cwd = os.path.dirname(os.path.dirname(path))
-            if os.path.basename(self.cli_cwd) == "target":
-                self.cli_cwd = os.path.dirname(self.cli_cwd)
+            # Update cwd using same logic as __init__
+            candidate = os.path.dirname(os.path.dirname(path))
+            if os.path.basename(candidate) == "target":
+                candidate = os.path.dirname(candidate)
+            system_prefixes = ("/usr", "/usr/local", "/opt")
+            if any(os.path.abspath(candidate).startswith(p) for p in system_prefixes):
+                candidate = os.path.expanduser("~")
+            self.cli_cwd = candidate
             self._update_exe_label()
             self.console.append(f"[GUI] CLI path set to: {path}\n")
             self._refresh_gpu_list()
