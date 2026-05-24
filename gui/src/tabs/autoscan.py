@@ -236,7 +236,9 @@ class AutoscanTab:
         self.app.console.append("[GUI] Resetting core offset/curve...\n")
 
         def do_export(_retcode: int) -> None:
-            self.app.run_cli_display(gpu_args + ["set", "vfp", "export", "-q", "-"])
+            self.app.run_cli_display(
+                gpu_args + ["set", "vfp", "export", "-q", self.init_csv_var.get()]
+            )
 
         self.app.run_cli_display(
             gpu_args + ["set", "nvml", "--core-offset", "0"],
