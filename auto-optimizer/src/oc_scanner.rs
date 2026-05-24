@@ -13,8 +13,9 @@ use num_traits::pow;
 use nvoc_core::{
     ClockDomain, Error, GpuOcParams, GpuOperation, GpuTarget, KilohertzDelta,
     NvapiLockedVoltageTarget, PState, QueryGpuInfo, QueryGpuStatus, QueryVfpPointVoltage,
-    ResetCoolerLevels, ResetVfpDeltas, SetVfpPointDelta, SetVfpVoltageLock, VfPoint,
-    VfpResetDomain, fetch_gpu_type, run, set_nvapi_pstate_clock_offsets, set_nvapi_vfp_curve_delta,
+    ResetCoolerLevels, ResetVfpDeltas, SetClockOffset, SetVfpPointDelta, SetVfpVoltageLock,
+    VfPoint, VfpResetDomain, fetch_gpu_type, run, set_nvapi_pstate_clock_offsets,
+    set_nvapi_vfp_curve_delta,
 };
 use std::cmp::min;
 use std::fs;
@@ -26,6 +27,27 @@ use std::time::{Duration, Instant};
 
 fn run_output<O: GpuOperation>(gpu: &GpuTarget<'_>, op: O) -> Result<O::Output, Error> {
     run(gpu, op).map(|report| report.output)
+}
+
+// Set memory clock offset via NVML (50-series) or NvAPI (older GPUs).
+// khz must be a multiple of 1000 — the scan always accumulates in 1000 kHz steps.
+fn set_mem_clock_mhz(gpu: &GpuTarget<'_>, is_50_series: bool, khz: i32) -> Result<(), Error> {
+    if is_50_series {
+        run_output(
+            gpu,
+            SetClockOffset {
+                domain: ClockDomain::Memory,
+                pstate: nvml_wrapper::enum_wrappers::device::PerformanceState::Zero,
+                mhz: khz / 1000,
+            },
+        )?;
+    } else {
+        set_nvapi_pstate_clock_offsets(
+            gpu,
+            [(PState::P0, ClockDomain::Memory, KilohertzDelta(khz))],
+        )?;
+    }
+    Ok(())
 }
 
 mod pressure_runner {
@@ -1103,6 +1125,7 @@ struct MemOcPhaseArgs<'a> {
     vfp_set_range: usize,
     minimum_delta_mem_freq_step: i32,
     mem_freq_step_exp: usize,
+    is_50_series: bool,
 }
 
 fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
@@ -1123,14 +1146,7 @@ fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
             Err(e) => eprintln!("Error: Failed to lock voltage - {:?}", e),
         }
 
-        set_nvapi_pstate_clock_offsets(
-            gpu,
-            [(
-                PState::P0,
-                ClockDomain::Memory,
-                KilohertzDelta(*init_vmem_oc_value),
-            )],
-        )?;
+        set_mem_clock_mhz(gpu, args.is_50_series, *init_vmem_oc_value)?;
 
         mem_test_num += 1;
         mem_test_code += 1;
@@ -1176,10 +1192,7 @@ fn run_mem_oc_phase<V: std::fmt::Display + Copy>(
         writeln!(l, "Test result is code #{} .", mem_test_flag)?;
 
         if mem_test_flag != 0 {
-            set_nvapi_pstate_clock_offsets(
-                gpu,
-                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
-            )?;
+            set_mem_clock_mhz(gpu, args.is_50_series, 0)?;
             println!(
                 "Long Test #{} FAILED on point: #{}, voltage: #{}, mem_freq_delta: #+{}. ",
                 mem_test_code,
@@ -1360,14 +1373,9 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
         let gpu_type = fetch_gpu_type(&info);
 
         // 50-series (Blackwell) does not support NvAPI_GPU_SetPstates20 for
-        // clock offsets; skip the memory-offset zeroing init for these GPUs.
         let is_50_series_gpu = gpu_type.as_ref().map(|t| t.is_maxq()).unwrap_or(false);
-        if !is_50_series_gpu {
-            set_nvapi_pstate_clock_offsets(
-                gpu,
-                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
-            )?;
-        }
+        // Zero memory offset on init; use NVML for 50-series, NvAPI for older GPUs.
+        set_mem_clock_mhz(gpu, is_50_series_gpu, 0)?;
 
         // Verify GPU is at its natural idle operating point before we modify any state.
         // This must run before the VFP delta and voltage lock, which change the GPU's
@@ -1498,9 +1506,11 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
                 p3 += 6;
             }
 
-            if p2 > p3 {
-                std::mem::swap(&mut p2, &mut p3);
-            }
+            // Sort non-zero key points ascending so the upward scan visits them in order.
+            // Zeros are sentinel "no point" values and sort to the end.
+            let mut kp = [p1, p2, p3, p4];
+            kp.sort_unstable_by_key(|&x| if x == 0 { usize::MAX } else { x });
+            [p1, p2, p3, p4] = kp;
 
             println!("key points detected:{},{},{},{}", p1, p2, p3, p4);
             writeln!(l, "\n\nkey points detected:{},{},{},{}", p1, p2, p3, p4)
@@ -1616,16 +1626,7 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
                 }
             }
 
-            if !is_50_series {
-                set_nvapi_pstate_clock_offsets(
-                    gpu,
-                    [(
-                        PState::P0,
-                        ClockDomain::Memory,
-                        KilohertzDelta(init_vmem_oc_value),
-                    )],
-                )?;
-            }
+            set_mem_clock_mhz(gpu, is_50_series, init_vmem_oc_value)?;
 
             apply_arch_safety_policy(
                 ArchSafetyPolicyPhase::PrePointTest,
@@ -1679,7 +1680,9 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
                 delta: KilohertzDelta(init_core_oc_value),
                 default_frequency,
             };
-            let _ = export_single_point(p_save, matches);
+            if let Err(e) = export_single_point(p_save, matches) {
+                eprintln!("Warning: failed to write point to CSV: {e:?}");
+            }
             // interpolate when not in ultrafast mode.
             if !is_ultrafast {
                 let prev_delta = prev_endpoint_delta.unwrap_or(init_core_oc_value);
@@ -1709,7 +1712,9 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
                         delta: KilohertzDelta(interpolated_delta),
                         default_frequency,
                     };
-                    let _ = export_single_point(p_save_prev, matches);
+                    if let Err(e) = export_single_point(p_save_prev, matches) {
+                        eprintln!("Warning: failed to write point to CSV: {e:?}");
+                    }
                 }
             }
             prev_endpoint_delta = Some(init_core_oc_value);
@@ -1731,11 +1736,8 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
 
         //memory oc
         let vmem_scan_switch = matches.get_flag("Vmem_scan_switch");
-        if vmem_scan_switch && !is_50_series {
-            set_nvapi_pstate_clock_offsets(
-                gpu,
-                [(PState::P0, ClockDomain::Memory, KilohertzDelta(0))],
-            )?;
+        if vmem_scan_switch {
+            set_mem_clock_mhz(gpu, is_50_series, 0)?;
 
             let mut mem_oc_safe_limit = 0;
             let minimum_delta_mem_freq_step = 1000;
@@ -1775,6 +1777,7 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
                 vfp_set_range,
                 minimum_delta_mem_freq_step,
                 mem_freq_step_exp,
+                is_50_series,
             };
 
             run_mem_oc_phase(
