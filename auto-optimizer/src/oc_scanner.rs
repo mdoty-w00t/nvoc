@@ -1471,7 +1471,7 @@ pub fn autoscan_gpuboostv3(gpus: &Vec<GpuTarget<'_>>, matches: &ArgMatches) -> R
                     gpus,
                     lower_voltage_point,
                     upper_voltage_point,
-                    "./ws/vfp-init.csv",
+                    cfg.init_csv.as_str(),
                 )?;
             }
 

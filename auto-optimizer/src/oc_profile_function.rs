@@ -66,17 +66,9 @@ fn spawn_dynamic_load_process() -> Result<Child, Error> {
 
 #[cfg(target_os = "linux")]
 fn spawn_dynamic_load_process() -> Result<Child, Error> {
-    let repo_root = env!("CARGO_MANIFEST_DIR");
-    Command::new("bash")
-        .arg("./test/dyn_load_export_opencl_linux.sh")
-        .current_dir(repo_root)
+    Command::new("/usr/lib/nvoc/test/dyn_load_export_opencl_linux.sh")
         .spawn()
-        .map_err(|e| {
-            Error::Custom(format!(
-                "Failed to start Linux load process with test/test_opencl_linux.sh load 10: {}",
-                e
-            ))
-        })
+        .map_err(|e| Error::Custom(format!("Failed to start dynamic load process: {}", e)))
 }
 
 #[cfg(all(not(windows), not(target_os = "linux")))]
@@ -434,7 +426,7 @@ pub fn handle_vfp_export(gpu: &GpuTarget<'_>, matches: &clap::ArgMatches) -> Res
         let points_load = collect_domain_vf_points(gpu, domain, legacy_vfp_flag)?.into_iter();
 
         // Export the load-default frequency to a temporary file
-        let temp_file = "./ws/temp_load.csv";
+        let temp_file = "/tmp/nvoc_temp_load.csv";
         export_vfp(File::create(temp_file)?, points_load, delimiter)?;
 
         // Step 4: Kill the load process

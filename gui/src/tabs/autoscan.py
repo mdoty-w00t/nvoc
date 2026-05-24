@@ -106,6 +106,28 @@ class AutoscanTab:
         ).pack(side="left", padx=(5, 0))
 
         row += 1
+        # Final VFP CSV (fix_result output / import source)
+        ctk.CTkLabel(params_grid, text="Final VFP CSV:").grid(
+            row=row, column=0, sticky="w", padx=5, pady=3
+        )
+        self.final_csv_var = ctk.StringVar(value="./ws/vfp.csv")
+        final_row = ctk.CTkFrame(params_grid, fg_color="transparent")
+        final_row.grid(row=row, column=1, sticky="ew", padx=5, pady=3)
+        LiteEntry(
+            final_row,
+            textvariable=self.final_csv_var,
+            width=52,
+            min_px=420,
+            justify="left",
+        ).pack(side="left")
+        LiteButton(
+            final_row,
+            text="...",
+            width=34,
+            command=lambda: self._browse_save(self.final_csv_var),
+        ).pack(side="left", padx=(5, 0))
+
+        row += 1
         # BSOD Recovery
         ctk.CTkLabel(params_grid, text="BSOD Recovery:").grid(
             row=row, column=0, sticky="w", padx=5, pady=3
@@ -265,17 +287,25 @@ class AutoscanTab:
     def _fix_result(self) -> None:
         gpu_args = self.app.get_gpu_args()
         mode = self.mode_var.get()
-        args = gpu_args + ["set", "vfp", "fix_result", "-m", "1"]
+        args = gpu_args + [
+            "set", "vfp", "fix_result",
+            "-m", "1",
+            "-v", self.output_csv_var.get(),
+            "-o", self.final_csv_var.get(),
+            "-i", self.init_csv_var.get(),
+        ]
         if mode == "ultrafast":
             args.append("-u")
         self.app.run_cli_display(args)
 
     def _import_final(self) -> None:
         gpu_args = self.app.get_gpu_args()
-        self.app.run_cli_display(gpu_args + ["set", "vfp", "import", "./ws/vfp.csv"])
+        self.app.run_cli_display(
+            gpu_args + ["set", "vfp", "import", self.final_csv_var.get()]
+        )
 
     def _export_final(self) -> None:
         gpu_args = self.app.get_gpu_args()
         self.app.run_cli_display(
-            gpu_args + ["set", "vfp", "export", "./ws/vfp-final.csv"]
+            gpu_args + ["set", "vfp", "export", "-q", "./ws/vfp-final.csv"]
         )
