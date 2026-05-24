@@ -2,6 +2,8 @@
 Autoscan Tab - VFP auto-scanning workflow.
 """
 
+import os
+
 import customtkinter as ctk
 from tkinter import filedialog
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -59,12 +61,14 @@ class AutoscanTab:
         params_grid.pack(fill="x", padx=10, pady=(0, 10))
         params_grid.columnconfigure(1, weight=0)
 
+        _ws = os.path.join(app.cli_cwd or os.path.expanduser("~"), "ws")
+
         row = 0
         # Output CSV
         ctk.CTkLabel(params_grid, text="Output CSV:").grid(
             row=row, column=0, sticky="w", padx=5, pady=3
         )
-        self.output_csv_var = ctk.StringVar(value="./ws/vfp-tem.csv")
+        self.output_csv_var = ctk.StringVar(value=os.path.join(_ws, "vfp-tem.csv"))
         out_row = ctk.CTkFrame(params_grid, fg_color="transparent")
         out_row.grid(row=row, column=1, sticky="ew", padx=5, pady=3)
         out_entry = LiteEntry(
@@ -87,7 +91,7 @@ class AutoscanTab:
         ctk.CTkLabel(params_grid, text="Init CSV:").grid(
             row=row, column=0, sticky="w", padx=5, pady=3
         )
-        self.init_csv_var = ctk.StringVar(value="./ws/vfp-init.csv")
+        self.init_csv_var = ctk.StringVar(value=os.path.join(_ws, "vfp-init.csv"))
         init_row = ctk.CTkFrame(params_grid, fg_color="transparent")
         init_row.grid(row=row, column=1, sticky="ew", padx=5, pady=3)
         init_entry = LiteEntry(
@@ -110,7 +114,7 @@ class AutoscanTab:
         ctk.CTkLabel(params_grid, text="Final VFP CSV:").grid(
             row=row, column=0, sticky="w", padx=5, pady=3
         )
-        self.final_csv_var = ctk.StringVar(value="./ws/vfp.csv")
+        self.final_csv_var = ctk.StringVar(value=os.path.join(_ws, "vfp.csv"))
         final_row = ctk.CTkFrame(params_grid, fg_color="transparent")
         final_row.grid(row=row, column=1, sticky="ew", padx=5, pady=3)
         LiteEntry(
@@ -322,6 +326,7 @@ class AutoscanTab:
 
     def _export_final(self) -> None:
         gpu_args = self.app.get_gpu_args()
+        ws = os.path.join(self.app.cli_cwd or os.path.expanduser("~"), "ws")
         self.app.run_cli_display(
-            gpu_args + ["set", "vfp", "export", "-q", "./ws/vfp-final.csv"]
+            gpu_args + ["set", "vfp", "export", "-q", os.path.join(ws, "vfp-final.csv")]
         )
